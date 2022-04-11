@@ -104,12 +104,17 @@ const char *tk_str(int type)
 
 void cc3_init(struct cc3 *self, FILE *fp)
 {
+    // Setup input
     self->fp = fp;
     self->cur = self->buf;
     self->end = self->buf;
 
+    // Setup FIFO
     self->tk_pos = 0;
     self->tk_cnt = 0;
+
+    // Setup global scope
+    self->cur_scope = calloc(1, sizeof *self->cur_scope);
 }
 
 static inline int lex_peek(struct cc3 *self, int i)

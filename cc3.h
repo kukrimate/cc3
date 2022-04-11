@@ -11,6 +11,10 @@
 /** Enforce unreachability **/
 #define ASSERT_NOT_REACHED() assert(0)
 
+/** Exit with an error message **/
+__attribute__((noreturn)) void err(const char *fmt, ...);
+
+
 /** Tokens **/
 
 enum {
@@ -121,6 +125,88 @@ struct tk_buf {
 
 const char *tk_str(int type);
 
+
+/** Types **/
+
+enum {
+    TY_VOID,
+    TY_CHAR,
+    TY_SCHAR,
+    TY_UCHAR,
+    TY_SHORT,
+    TY_USHORT,
+    TY_INT,
+    TY_UINT,
+    TY_LONG,
+    TY_ULONG,
+    TY_LLONG,
+    TY_ULLONG,
+    TY_FLOAT,
+    TY_DOUBLE,
+    TY_LDOUBLE,
+    TY_BOOL,
+    TY_STRUCT,
+    TY_POINTER,
+    TY_ARRAY,
+    TY_FUNCTION,
+};
+
+struct member {
+    struct member *next;
+
+    struct ty *ty;
+    const char *name;
+};
+
+struct ty {
+    struct ty *next;
+
+    int kind;
+
+    union {
+        struct {
+            struct member *members;
+        } stru;
+
+        struct {
+            struct ty *base_ty;
+        } pointer;
+
+        struct {
+            struct ty *elem_ty;
+            int cnt;
+        } array;
+
+        struct {
+            struct ty *ret_ty;
+            struct ty *param_tys;
+            bool var;
+        } function;
+    };
+};
+
+struct ty *make_ty(int kind);
+struct ty *make_pointer(struct ty *base_ty);
+struct ty *make_array(struct ty *elem_ty, int cnt);
+struct ty *make_function(struct ty *ret_ty, struct ty *param_tys, bool var);
+
+void print_ty(struct ty *ty);
+
+/** Symbol table **/
+
+struct sym {
+    struct sym *next;
+
+    int sc;
+    struct ty *ty;
+    const char *name;
+};
+
+struct scope {
+    struct scope *parent;
+    struct sym *syms;
+};
+
 /** Compiler context **/
 
 #define LEX_BUF_SZ 8192
@@ -137,13 +223,28 @@ struct cc3 {
     // Token buffer (FIFO)
     struct tk_buf tk_buf[LEX_TK_CNT];
     int tk_pos, tk_cnt;
+
+    // Symbol table
+    struct scope *cur_scope;
 };
 
 void cc3_init(struct cc3 *self, FILE *fp);
 
+/** Tokenizer **/
+
 struct tk_buf *lex_tok(struct cc3 *self, int i);
 void lex_adv(struct cc3 *self);
 
+/** Parser **/
+
 void parse(struct cc3 *self);
+
+/** Semantic actions **/
+
+void sema_enter(struct cc3 *self);
+void sema_exit(struct cc3 *self);
+void sema_declare(struct cc3 *self, int sc, struct ty *ty, const char *name);
+struct sym *sema_lookup(struct cc3 *self, const char *name);
+struct ty *sema_findtypedef(struct cc3 *self, const char *name);
 
 #endif
