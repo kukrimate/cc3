@@ -1,10 +1,8 @@
 #include "cc3.h"
 
-const char *tk_str(struct tk_buf *tk)
+const char *tk_str(int type)
 {
-    static char buf[10];
-
-    switch (tk->type) {
+    switch (type) {
     case TK_EOF:		return "EOF";
 
     case TK_AUTO:		return "auto";
@@ -45,15 +43,9 @@ const char *tk_str(struct tk_buf *tk)
     case TK_COMPLEX:    return "_Complex";
     case TK_IMAGINARY:  return "_Imaginary";
 
-    case TK_IDENTIFIER:
-        return tk->strval;
-
-    case TK_CONSTANT:
-        snprintf(buf, sizeof buf, "%d", tk->intval);
-        return buf;
-
-    case TK_STR_LIT:
-        return tk->strval;
+    case TK_IDENTIFIER: return "IDENTIFIER";
+    case TK_CONSTANT:   return "CONSTANT";
+    case TK_STR_LIT:    return "STR_LIT";
 
     case TK_LSQ:		return "[";
     case TK_RSQ:		return "]";

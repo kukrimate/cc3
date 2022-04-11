@@ -9,11 +9,13 @@ int g(void);
 int h(int a, int b, ...);
 int i(void *, float);
 
+/*
 kr(a, b)
 	void *b;
 {
 
 }
+*/
 
 void bar(void) {
 	int a;

@@ -2,7 +2,10 @@
 #define CC3_H
 
 #include <assert.h>
+#include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /** Enforce unreachability **/
@@ -116,7 +119,7 @@ struct tk_buf {
     char strval[4096];
 };
 
-const char *tk_str(struct tk_buf *tk);
+const char *tk_str(int type);
 
 /** Compiler context **/
 
@@ -140,5 +143,7 @@ void cc3_init(struct cc3 *self, FILE *fp);
 
 struct tk_buf *lex_tok(struct cc3 *self, int i);
 void lex_adv(struct cc3 *self);
+
+void parse(struct cc3 *self);
 
 #endif
