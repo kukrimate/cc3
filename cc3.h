@@ -14,6 +14,22 @@
 /** Exit with an error message **/
 __attribute__((noreturn)) void err(const char *fmt, ...);
 
+/** Resizable string abstraction **/
+
+typedef struct string string_t;
+
+struct string {
+    size_t length;
+    size_t capacity;
+    char *data;
+};
+
+void string_init(string_t *self);
+void string_free(string_t *self);
+void string_clear(string_t *self);
+void string_reserve(string_t *self, size_t new_capacity);
+void string_push(string_t *self, char c);
+void string_printf(string_t *self, const char *fmt, ...);
 
 /** Tokens **/
 
@@ -114,17 +130,49 @@ enum {
     TK_ERROR,           // Unknown character
 };
 
-struct tk_buf {
-    /** Type **/
-    int type;
+typedef struct tk tk_t;
 
-    /** Value **/
-    int intval;
-    char strval[4096];
+struct tk {
+    int type;
+    size_t line, col;
+    string_t spelling;
 };
 
-const char *tk_str(int type);
+static inline const char *tk_str(tk_t *tk)
+{
+    return tk->spelling.data;
+}
 
+/** Lexer **/
+
+#define LEX_BUF_SZ 8192
+#define LEX_TK_CNT 2
+
+typedef struct lexer lexer_t;
+
+struct lexer {
+    // Input file
+    FILE *fp;
+
+    // Input buffer (not really a FIFO, it's just cheaper to shift
+    //               the few remaining chars up after a lookahead)
+    char buf[LEX_BUF_SZ], *cur, *end;
+
+    // Current position in the input
+    size_t line, col;
+
+    // Token buffer (FIFO)
+    tk_t tk_buf[LEX_TK_CNT];
+    int tk_pos, tk_cnt;
+
+    // Current token
+    tk_t *tk;
+};
+
+void lex_init(lexer_t *self, FILE *fp);
+void lex_free(lexer_t *self);
+tk_t *lex_tok(lexer_t *self, int i);
+void lex_adv(lexer_t *self);
 
 /** Types **/
 
@@ -151,100 +199,86 @@ enum {
     TY_FUNCTION,
 };
 
-struct member {
-    struct member *next;
-
-    struct ty *ty;
-    const char *name;
-};
+typedef struct ty ty_t;
 
 struct ty {
-    struct ty *next;
+    ty_t *next;
+
+    int rc;
 
     int kind;
 
     union {
         struct {
-            struct member *members;
-        } stru;
-
-        struct {
-            struct ty *base_ty;
+            ty_t *base_ty;
         } pointer;
 
         struct {
-            struct ty *elem_ty;
+            ty_t *elem_ty;
             int cnt;
         } array;
 
         struct {
-            struct ty *ret_ty;
-            struct ty *param_tys;
+            ty_t *ret_ty;
+            ty_t *param_tys;
             bool var;
         } function;
     };
 };
 
-struct ty *make_ty(int kind);
-struct ty *make_pointer(struct ty *base_ty);
-struct ty *make_array(struct ty *elem_ty, int cnt);
-struct ty *make_function(struct ty *ret_ty, struct ty *param_tys, bool var);
+ty_t *make_ty(int kind);
+ty_t *make_pointer(ty_t *base_ty);
+ty_t *make_array(ty_t *elem_ty, int cnt);
+ty_t *make_param(ty_t *ty);
+ty_t *make_function(ty_t *ret_ty, ty_t *param_tys, bool var);
 
-void print_ty(struct ty *ty);
+ty_t *clone_ty(ty_t *ty);
+void free_ty(ty_t *ty);
+
+void print_ty(ty_t *ty);
 
 /** Symbol table **/
 
+typedef struct sym sym_t;
+
 struct sym {
-    struct sym *next;
+    sym_t *next;
 
     int sc;
-    struct ty *ty;
-    const char *name;
+    ty_t *ty;
+    char *name;
 };
+
+typedef struct scope scope_t;
 
 struct scope {
-    struct scope *parent;
-    struct sym *syms;
+    scope_t *parent;
+    sym_t *syms;
 };
-
-/** Compiler context **/
-
-#define LEX_BUF_SZ 8192
-#define LEX_TK_CNT 2
-
-struct cc3 {
-    // Input file
-    FILE *fp;
-
-    // Input buffer (not really a FIFO, it's just cheaper to shift
-    //               the few remaining chars up after a lookahead)
-    char buf[LEX_BUF_SZ], *cur, *end;
-
-    // Token buffer (FIFO)
-    struct tk_buf tk_buf[LEX_TK_CNT];
-    int tk_pos, tk_cnt;
-
-    // Symbol table
-    struct scope *cur_scope;
-};
-
-void cc3_init(struct cc3 *self, FILE *fp);
-
-/** Tokenizer **/
-
-struct tk_buf *lex_tok(struct cc3 *self, int i);
-void lex_adv(struct cc3 *self);
-
-/** Parser **/
-
-void parse(struct cc3 *self);
 
 /** Semantic actions **/
 
-void sema_enter(struct cc3 *self);
-void sema_exit(struct cc3 *self);
-void sema_declare(struct cc3 *self, int sc, struct ty *ty, const char *name);
-struct sym *sema_lookup(struct cc3 *self, const char *name);
-struct ty *sema_findtypedef(struct cc3 *self, const char *name);
+typedef struct sema sema_t;
+
+struct sema {
+    scope_t *scope;
+};
+
+void sema_enter(sema_t *self);
+void sema_exit(sema_t *self);
+void sema_declare(sema_t *self, int sc, struct ty *ty, char *name);
+sym_t *sema_lookup(sema_t *self, const char *name);
+struct ty *sema_findtypedef(sema_t *self, const char *name);
+
+/** Parser **/
+
+typedef struct cc3 cc3_t;
+
+struct cc3 {
+    lexer_t lexer;
+    sema_t sema;
+};
+
+void parse(cc3_t *self);
 
 #endif

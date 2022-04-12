@@ -1,38 +1,38 @@
 #include "cc3.h"
 
-__attribute__((noreturn)) void err(const char *fmt, ...)
+/** Interface to the lexer **/
+
+static inline tk_t *peek(cc3_t *self, int i)
 {
-    // Print prefix
-    fputs("Error: ", stderr);
-
-    // Format error
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-
-    // Print newline
-    fputc('\n', stderr);
-
-    // Panic
-    abort();
+    return lex_tok(&self->lexer, i);
 }
 
-
-static struct tk_buf *want(struct cc3 *self, int type)
+static inline void adv(cc3_t *self)
 {
-    struct tk_buf *tk = lex_tok(self, 0);
-    if (tk->type != type)
-        err("Unexpected token %s expected %s", tk_str(tk->type), tk_str(type));
-    lex_adv(self);
+    lex_adv(&self->lexer);
+}
+
+static inline tk_t *next(cc3_t *self)
+{
+    tk_t *tk = lex_tok(&self->lexer, 0);
+    lex_adv(&self->lexer);
     return tk;
 }
 
-static struct tk_buf *maybe_want(struct cc3 *self, int type)
+static inline tk_t *want(cc3_t *self, int want_type)
 {
-    struct tk_buf *tk = lex_tok(self, 0);
-    if (tk->type == type) {
-        lex_adv(self);
+    tk_t *tk = lex_tok(&self->lexer, 0);
+    if (tk->type != want_type)
+        err("Unexpected token %s", tk_str(tk));
+    lex_adv(&self->lexer);
+    return tk;
+}
+
+static inline tk_t *maybe_want(cc3_t *self, int want_type)
+{
+    tk_t *tk = lex_tok(&self->lexer, 0);
+    if (tk->type == want_type) {
+        lex_adv(&self->lexer);
         return tk;
     }
     return NULL;
@@ -40,46 +40,44 @@ static struct tk_buf *maybe_want(struct cc3 *self, int type)
 
 /** Expressions **/
 
-static void primary_expression(struct cc3 *self);
-static void postfix_expression(struct cc3 *self);
-static void unary_expression(struct cc3 *self);
-static void cast_expression(struct cc3 *self);
-static void multiplicative_expression(struct cc3 *self);
-static void additive_expression(struct cc3 *self);
-static void shift_expression(struct cc3 *self);
-static void relational_expression(struct cc3 *self);
-static void equality_expression(struct cc3 *self);
-static void and_expression(struct cc3 *self);
-static void xor_expression(struct cc3 *self);
-static void or_expression(struct cc3 *self);
-static void land_expression(struct cc3 *self);
-static void lor_expression(struct cc3 *self);
-static void conditional_expression(struct cc3 *self);
-static void assignment_expression(struct cc3 *self);
-static void expression(struct cc3 *self);
-static void constant_expression(struct cc3 *self);
+static void primary_expression(cc3_t *self);
+static void postfix_expression(cc3_t *self);
+static void unary_expression(cc3_t *self);
+static void cast_expression(cc3_t *self);
+static void multiplicative_expression(cc3_t *self);
+static void additive_expression(cc3_t *self);
+static void shift_expression(cc3_t *self);
+static void relational_expression(cc3_t *self);
+static void equality_expression(cc3_t *self);
+static void and_expression(cc3_t *self);
+static void xor_expression(cc3_t *self);
+static void or_expression(cc3_t *self);
+static void land_expression(cc3_t *self);
+static void lor_expression(cc3_t *self);
+static void conditional_expression(cc3_t *self);
+static void assignment_expression(cc3_t *self);
+static void expression(cc3_t *self);
+static void constant_expression(cc3_t *self);
 
-void primary_expression(struct cc3 *self)
+void primary_expression(cc3_t *self)
 {
-    struct tk_buf *tk = lex_tok(self, 0);
+    tk_t *tk = next(self);
 
     switch (tk->type) {
     case TK_IDENTIFIER:
     case TK_CONSTANT:
     case TK_STR_LIT:
-        lex_adv(self);
         break;
     case TK_LPAREN:
-        lex_adv(self);
         expression(self);
         want(self, TK_RPAREN);
         break;
     default:
-        err("Invalid primary expression %s", tk_str(tk->type));
+        err("Invalid primary expression %s", tk_str(tk));
     }
 }
 
-void postfix_expression(struct cc3 *self)
+void postfix_expression(cc3_t *self)
 {
     primary_expression(self);
 
@@ -126,7 +124,7 @@ void postfix_expression(struct cc3 *self)
     // FIXME: recognize compound literals here
 }
 
-void unary_expression(struct cc3 *self)
+void unary_expression(cc3_t *self)
 {
     if (maybe_want(self, TK_INCR))
         unary_expression(self);
@@ -151,13 +149,13 @@ void unary_expression(struct cc3 *self)
     //    and sizeof '(' type-name ')' here
 }
 
-void cast_expression(struct cc3 *self)
+void cast_expression(cc3_t *self)
 {
     unary_expression(self);
     // FIXME: recognize '(' type-name ')' here
 }
 
-void multiplicative_expression(struct cc3 *self)
+void multiplicative_expression(cc3_t *self)
 {
     cast_expression(self);
     for (;;)
@@ -171,7 +169,7 @@ void multiplicative_expression(struct cc3 *self)
             return;
 }
 
-void additive_expression(struct cc3 *self)
+void additive_expression(cc3_t *self)
 {
     multiplicative_expression(self);
     for (;;)
@@ -183,7 +181,7 @@ void additive_expression(struct cc3 *self)
             return;
 }
 
-void shift_expression(struct cc3 *self)
+void shift_expression(cc3_t *self)
 {
     additive_expression(self);
     for (;;)
@@ -195,7 +193,7 @@ void shift_expression(struct cc3 *self)
             return;
 }
 
-void relational_expression(struct cc3 *self)
+void relational_expression(cc3_t *self)
 {
     shift_expression(self);
     for (;;)
@@ -211,7 +209,7 @@ void relational_expression(struct cc3 *self)
             return;
 }
 
-void equality_expression(struct cc3 *self)
+void equality_expression(cc3_t *self)
 {
     relational_expression(self);
     for (;;)
@@ -223,42 +221,42 @@ void equality_expression(struct cc3 *self)
             return;
 }
 
-void and_expression(struct cc3 *self)
+void and_expression(cc3_t *self)
 {
     equality_expression(self);
     while (maybe_want(self, TK_AND))
         equality_expression(self);
 }
 
-void xor_expression(struct cc3 *self)
+void xor_expression(cc3_t *self)
 {
     and_expression(self);
     while (maybe_want(self, TK_XOR))
         and_expression(self);
 }
 
-void or_expression(struct cc3 *self)
+void or_expression(cc3_t *self)
 {
     xor_expression(self);
     while (maybe_want(self, TK_OR))
         xor_expression(self);
 }
 
-void land_expression(struct cc3 *self)
+void land_expression(cc3_t *self)
 {
     or_expression(self);
     while (maybe_want(self, TK_LAND))
         or_expression(self);
 }
 
-void lor_expression(struct cc3 *self)
+void lor_expression(cc3_t *self)
 {
     land_expression(self);
     while (maybe_want(self, TK_LOR))
         land_expression(self);
 }
 
-void conditional_expression(struct cc3 *self)
+void conditional_expression(cc3_t *self)
 {
     lor_expression(self);
 
@@ -272,7 +270,7 @@ void conditional_expression(struct cc3 *self)
     conditional_expression(self);
 }
 
-void assignment_expression(struct cc3 *self)
+void assignment_expression(cc3_t *self)
 {
     conditional_expression(self);
 
@@ -300,30 +298,29 @@ void assignment_expression(struct cc3 *self)
         assignment_expression(self);
 }
 
-void expression(struct cc3 *self)
+void expression(cc3_t *self)
 {
     assignment_expression(self);
     while (maybe_want(self, TK_COMMA))
         assignment_expression(self);
 }
 
-void constant_expression(struct cc3 *self)
+void constant_expression(cc3_t *self)
 {
     conditional_expression(self);
 }
 
 /** Declarations **/
 
-static struct ty *declaration_specifiers(struct cc3 *self, int *out_sc);
-static void struct_declaration_list(struct cc3 *self);
-static void enumerator_list(struct cc3 *self);
-static struct ty *declarator(struct cc3 *self, struct ty *ty,
-    bool allow_abstract,
-    const char **out_name);
-static void type_qualifier_list(struct cc3 *self);
-static void initializer(struct cc3 *self);
-static void initializer_list(struct cc3 *self);
-static void designation(struct cc3 *self);
+static ty_t *declaration_specifiers(cc3_t *self, int *out_sc);
+static void struct_declaration_list(cc3_t *self);
+static void enumerator_list(cc3_t *self);
+static ty_t *declarator(cc3_t *self, ty_t *ty,
+    bool allow_abstract, char **out_name);
+static void type_qualifier_list(cc3_t *self);
+static void initializer(cc3_t *self);
+static void initializer_list(cc3_t *self);
+static void designation(cc3_t *self);
 
 enum {
     TS_VOID, TS_CHAR, TS_SHORT, TS_INT, TS_LONG, TS_FLOAT, TS_DOUBLE,
@@ -332,7 +329,7 @@ enum {
 
 // One of the ugliest part of C: this hand-written nightmare of a function
 // decodes the a multiset of type specifiers into an actual type
-static struct ty *decode_ts(int ts[static NUM_TS])
+static ty_t *decode_ts(int ts[static NUM_TS])
 {
     static const struct {
         int ts[NUM_TS];
@@ -409,7 +406,7 @@ static struct ty *decode_ts(int ts[static NUM_TS])
     err("Provided type specifiers do not name a valid type");
 }
 
-static struct ty *declaration_specifiers(struct cc3 *self, int *out_sc)
+static ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
 {
     bool match = false;
 
@@ -417,13 +414,13 @@ static struct ty *declaration_specifiers(struct cc3 *self, int *out_sc)
     *out_sc = -1;
 
     // Type specifiers
-    struct ty *ty = NULL;
+    ty_t *ty = NULL;
     bool had_ts = false;
     int ts[NUM_TS] = {0};
 
     for (;;) {
         // Read token
-        struct tk_buf *tk = lex_tok(self, 0);
+        tk_t *tk = peek(self, 0);
 
         // Match token
         switch (tk->type) {
@@ -503,7 +500,7 @@ static struct ty *declaration_specifiers(struct cc3 *self, int *out_sc)
 
         case TK_STRUCT:
         case TK_UNION:
-            lex_adv(self);
+            adv(self);
 
             if (ty || had_ts)
                 err("Invalid type specifiers");
@@ -519,7 +516,7 @@ static struct ty *declaration_specifiers(struct cc3 *self, int *out_sc)
             continue;
 
         case TK_ENUM:
-            lex_adv(self);
+            adv(self);
 
             if (ty || had_ts)
                 err("Invalid type specifiers");
@@ -553,7 +550,7 @@ static struct ty *declaration_specifiers(struct cc3 *self, int *out_sc)
                 goto end_decl_specs;
 
             // Otherwise it might become a type
-            if ((ty = sema_findtypedef(self, tk->strval)))
+            if ((ty = sema_findtypedef(&self->sema, tk_str(tk))))
                 break;
 
             // FALLTHROUGH
@@ -572,18 +569,18 @@ static struct ty *declaration_specifiers(struct cc3 *self, int *out_sc)
         }
 
         // Consume token
-        lex_adv(self);
+        adv(self);
 
         // Note that we've matched something
         match = true;
     }
 }
 
-void struct_declaration_list(struct cc3 *self)
+void struct_declaration_list(cc3_t *self)
 {
     do {
         int sc;
-        struct ty *base_ty = declaration_specifiers(self, &sc);
+        ty_t *base_ty = declaration_specifiers(self, &sc);
 
         if (!base_ty)
             err("Expected declaration in struct");
@@ -594,18 +591,20 @@ void struct_declaration_list(struct cc3 *self)
                 continue;
             }
 
-            const char *name;
-            struct ty *ty = declarator(self, base_ty, false, &name);
+            char *name;
+            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
 
             if (maybe_want(self, TK_COLON))
                 constant_expression(self);
 
         } while (!maybe_want(self, TK_SEMICOLON));
 
+        free_ty(base_ty);
+
     } while (!maybe_want(self, TK_RCURLY));
 }
 
-void enumerator_list(struct cc3 *self)
+void enumerator_list(cc3_t *self)
 {
     for (;;) {
         // Read enumerator name
@@ -625,11 +624,10 @@ void enumerator_list(struct cc3 *self)
     }
 }
 
-static struct ty *declarator_suffixes(struct cc3 *self, struct ty *ty)
+static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
 {
     for (;;) {
         /** Array declarator **/
-
         if (maybe_want(self, TK_LSQ)) {
             // Function argument declared as arrays (really pointers) can be
             // qualified like normal pointers
@@ -651,82 +649,76 @@ static struct ty *declarator_suffixes(struct cc3 *self, struct ty *ty)
         }
 
         /** Function declarator **/
-
         if (maybe_want(self, TK_LPAREN)) {
-            // An empty list is allowed, it means "unspecified number of parameters"
+            // K&R identifier list (including an empty one)
             if (maybe_want(self, TK_RPAREN)) {
-                // NOTE: K&R functions have no argument type checking, we
-                // just re-use the varargs codepath with no arguments
+                // NOTE: K&R functions are marked varargs with no parameters
                 ty = make_function(ty, NULL, true);
                 continue;
             }
 
-            // If there is something it's either a K&R identifier list
             if (maybe_want(self, TK_IDENTIFIER)) {
-                // Read identifiers until no comma was found
                 while (maybe_want(self, TK_COMMA))
                     want(self, TK_IDENTIFIER);
-
-                // ) must follow the identifier list
                 want(self, TK_RPAREN);
 
                 ty = make_function(ty, NULL, true);
                 continue;
             }
 
-            // Or otherwise we have an ANSI C parameter type list
+            // "void" as the only unnamed parameter means no parameters
+            if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
+                adv(self);
+                adv(self);
 
-            // An ANSI style prototype has it's own scope
-            sema_enter(self);
+                ty = make_function(ty, NULL, false);
+                continue;
+            }
 
-            struct ty *param_tys = NULL, **cur_param_ty = &param_tys;
+            // Or otherwise a prototype must follow
+            sema_enter(&self->sema);
+
+            ty_t *param_tys = NULL, **tail = &param_tys;
             bool var = false;
 
-            int sc;
-            while ((*cur_param_ty = declaration_specifiers(self, &sc))) {
+            for (;;) {
+                int sc;
+                if (!(*tail = declaration_specifiers(self, &sc)))
+                    break;
 
-                // Parameter declarator must follow
-                // (this can also be an abstract declarator)
-                const char *param_name;
-                *cur_param_ty = declarator(self, *cur_param_ty, true, &param_name);
+                char *name;
+                *tail = make_param(declarator(self, *tail, true, &name));
 
-                // Trigger semantic action on parameter declaration with a name
-                if (param_name)
-                    sema_declare(self, sc, *cur_param_ty, param_name);
+                if (name)
+                    sema_declare(&self->sema, sc, clone_ty(*tail), name);
 
-                if (maybe_want(self, TK_COMMA)) {
-                    // If there is a comma, ellipsis might follow
-                    if (maybe_want(self, TK_ELLIPSIS)) {
-                        var = true;
-                        break;
-                    }
-                    // Otherwise if there is no ellipsis we just continue
-                } else {
-                    // No comma means we're at the end for sure
+                // If there is no comma the end was reached
+                if (!maybe_want(self, TK_COMMA))
+                    break;
+
+                // Otherwise we check for ...
+                if (maybe_want(self, TK_ELLIPSIS)) {
+                    var = true;
                     break;
                 }
 
-                cur_param_ty = &(*cur_param_ty)->next;
+                tail = &(*tail)->next;
             }
 
-            // ) must follow parameter type list
             want(self, TK_RPAREN);
-
-            // Exit prototype scope
-            sema_exit(self);
+            sema_exit(&self->sema);
 
             ty = make_function(ty, param_tys, var);
             continue;
         }
 
         /** Not a valid suffix -> we're done **/
-
         return ty;
     }
 }
 
-struct ty *declarator(struct cc3 *self, struct ty *ty, bool allow_abstract,
-    const char **out_name)
+ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract,
+    char **out_name)
 {
     // Read prefix
     while (maybe_want(self, TK_MUL)) {
@@ -738,8 +730,8 @@ struct ty *declarator(struct cc3 *self, struct ty *ty, bool allow_abstract,
     // *not* typedef-name ')'
 
     if (maybe_want(self, TK_LPAREN)) {  // '(' declarator ')'
-        struct ty *dummy = calloc(1, sizeof *dummy);
-        struct ty *result = declarator(self, dummy, allow_abstract, out_name);
+        ty_t *dummy = calloc(1, sizeof *dummy);
+        ty_t *result = declarator(self, dummy, allow_abstract, out_name);
         want(self, TK_RPAREN);
 
         // Read suffixes
@@ -752,36 +744,36 @@ struct ty *declarator(struct cc3 *self, struct ty *ty, bool allow_abstract,
         return result;
     }
 
-    struct tk_buf *tk;
+    tk_t *tk;
 
     if (allow_abstract) {
         if ((tk = maybe_want(self, TK_IDENTIFIER)))
-            *out_name = strdup(tk->strval);
+            *out_name = strdup(tk_str(tk));
         else
             *out_name = NULL;
     } else {
         tk = want(self, TK_IDENTIFIER);
-        *out_name = strdup(tk->strval);
+        *out_name = strdup(tk_str(tk));
     }
 
     return declarator_suffixes(self, ty);
 }
 
-void type_qualifier_list(struct cc3 *self)
+void type_qualifier_list(cc3_t *self)
 {
     for (;;)
-        switch (lex_tok(self, 0)->type) {
+        switch (peek(self, 0)->type) {
         case TK_CONST:
         case TK_RESTRICT:
         case TK_VOLATILE:
-            lex_adv(self);
+            adv(self);
             break;
         default:
             return;
         }
 }
 
-void initializer(struct cc3 *self)
+void initializer(cc3_t *self)
 {
     if (maybe_want(self, TK_LCURLY))
         initializer_list(self);
@@ -789,7 +781,7 @@ void initializer(struct cc3 *self)
         assignment_expression(self);
 }
 
-void initializer_list(struct cc3 *self)
+void initializer_list(cc3_t *self)
 {
     for (;;) {
         designation(self);
@@ -805,7 +797,7 @@ void initializer_list(struct cc3 *self)
     }
 }
 
-void designation(struct cc3 *self)
+void designation(cc3_t *self)
 {
     bool match = false;
 
@@ -828,22 +820,23 @@ end:
 
 /** Statements **/
 
-static bool declaration(struct cc3 *self)
+static bool declaration(cc3_t *self)
 {
     int sc;
-    struct ty *base_ty = declaration_specifiers(self, &sc);
+    ty_t *base_ty = declaration_specifiers(self, &sc);
 
     if (!base_ty)
         return false;
 
     if (!maybe_want(self, TK_SEMICOLON)) {
+
         do {
             // Read declarator
-            const char *name;
-            struct ty *ty = declarator(self, base_ty, false, &name);
+            char *name;
+            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
 
             // Trigger semantic action
-            sema_declare(self, sc, ty, name);
+            sema_declare(&self->sema, sc, ty, name);
 
             // Read initializer
             if (maybe_want(self, TK_AS))
@@ -855,32 +848,33 @@ static bool declaration(struct cc3 *self)
         want(self, TK_SEMICOLON);
     }
 
+    free_ty(base_ty);
+
     return true;
 }
 
-static void statement(struct cc3 *self);
+static void statement(cc3_t *self);
 
-static void block_item_list(struct cc3 *self)
+static void block_item_list(cc3_t *self)
 {
-    sema_enter(self);
+    sema_enter(&self->sema);
     while (!maybe_want(self, TK_RCURLY))
         if (!declaration(self))
             statement(self);
-    sema_exit(self);
+    sema_exit(&self->sema);
 }
 
-void statement(struct cc3 *self)
+void statement(cc3_t *self)
 {
     // Statements may be preceeded by labels
 
-    if (lex_tok(self, 0)->type == TK_IDENTIFIER
-            && lex_tok(self, 1)->type == TK_COLON) {    // IDENTIFIER ':'
-        lex_adv(self);
-        lex_adv(self);
-    } else if (maybe_want(self, TK_CASE)) {             // CASE
+    if (peek(self, 0)->type == TK_IDENTIFIER && peek(self, 1)->type == TK_COLON) {
+        adv(self);
+        adv(self);
+    } else if (maybe_want(self, TK_CASE)) {
         constant_expression(self);
         want(self, TK_COLON);
-    } else if (maybe_want(self, TK_DEFAULT)) {          // DEFAULT
+    } else if (maybe_want(self, TK_DEFAULT)) {
         want(self, TK_COLON);
     }
 
@@ -953,7 +947,7 @@ void statement(struct cc3 *self)
         want(self, TK_LPAREN);
 
         // C99: for creates a scope of it's own
-        sema_enter(self);
+        sema_enter(&self->sema);
 
         if (!declaration(self))
             if (!maybe_want(self, TK_SEMICOLON)) {
@@ -974,7 +968,7 @@ void statement(struct cc3 *self)
         statement(self);
 
         // Exit for scope
-        sema_exit(self);
+        sema_exit(&self->sema);
 
         return;
     }
@@ -1008,44 +1002,46 @@ void statement(struct cc3 *self)
     }
 }
 
-void parse(struct cc3 *self)
+void parse(cc3_t *self)
 {
     int sc;
-    struct ty *base_ty;
+    ty_t *base_ty;
 
     while ((base_ty = declaration_specifiers(self, &sc))) {
-        // No declarators
-        if (maybe_want(self, TK_SEMICOLON))
-            continue;
-
-        // Read first declarator
-        const char *name;
-        struct ty *ty = declarator(self, base_ty, false, &name);
-
-        // Trigger semantic action
-        sema_declare(self, sc, ty, name);
-
-        // Check for function definition
-        if (maybe_want(self, TK_LCURLY)) {
-            block_item_list(self);
-            continue;
-        }
-
-        // If it's not a function it might have an initializer
-        if (maybe_want(self, TK_AS))
-            initializer(self);
-
-        // And further declarations might follow
-        while (maybe_want(self, TK_COMMA)) {
-            const char *name;
-            struct ty *ty = declarator(self, base_ty, false, &name);
+        if (!maybe_want(self, TK_SEMICOLON)) {
+            // Read first declarator
+            char *name;
+            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
 
             // Trigger semantic action
-            sema_declare(self, sc, ty, name);
+            sema_declare(&self->sema, sc, ty, name);
 
+            // Check for function definition
+            if (maybe_want(self, TK_LCURLY)) {
+                block_item_list(self);
+                free_ty(base_ty);
+                continue;
+            }
+
+            // If it's not a function it might have an initializer
             if (maybe_want(self, TK_AS))
                 initializer(self);
+
+            // And further declarations might follow
+            while (maybe_want(self, TK_COMMA)) {
+                char *name;
+                ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
+
+                // Trigger semantic action
+                sema_declare(&self->sema, sc, ty, name);
+
+                if (maybe_want(self, TK_AS))
+                    initializer(self);
+            }
         }
+
+        // Free base type
+        free_ty(base_ty);
 
         // And the list must end with a ;
         want(self, TK_SEMICOLON);

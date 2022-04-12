@@ -1,2 +1,2 @@
 CFLAGS = -std=c99 -D_GNU_SOURCE -Wall -g
-cc3: lex.o parse.o sema.o cc3.o
+cc3: cc3.o sema.o parse.o lex.o util.o
