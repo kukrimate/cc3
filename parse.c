@@ -40,274 +40,298 @@ static inline tk_t *maybe_want(cc3_t *self, int want_type)
 
 /** Expressions **/
 
-static void primary_expression(cc3_t *self);
-static void postfix_expression(cc3_t *self);
-static void unary_expression(cc3_t *self);
-static void cast_expression(cc3_t *self);
-static void multiplicative_expression(cc3_t *self);
-static void additive_expression(cc3_t *self);
-static void shift_expression(cc3_t *self);
-static void relational_expression(cc3_t *self);
-static void equality_expression(cc3_t *self);
-static void and_expression(cc3_t *self);
-static void xor_expression(cc3_t *self);
-static void or_expression(cc3_t *self);
-static void land_expression(cc3_t *self);
-static void lor_expression(cc3_t *self);
-static void conditional_expression(cc3_t *self);
-static void assignment_expression(cc3_t *self);
-static void expression(cc3_t *self);
-static void constant_expression(cc3_t *self);
+static expr_t *primary_expression(cc3_t *self);
+static expr_t *postfix_expression(cc3_t *self);
+static expr_t *unary_expression(cc3_t *self);
+static expr_t *cast_expression(cc3_t *self);
+static expr_t *multiplicative_expression(cc3_t *self);
+static expr_t *additive_expression(cc3_t *self);
+static expr_t *shift_expression(cc3_t *self);
+static expr_t *relational_expression(cc3_t *self);
+static expr_t *equality_expression(cc3_t *self);
+static expr_t *and_expression(cc3_t *self);
+static expr_t *xor_expression(cc3_t *self);
+static expr_t *or_expression(cc3_t *self);
+static expr_t *land_expression(cc3_t *self);
+static expr_t *lor_expression(cc3_t *self);
+static expr_t *conditional_expression(cc3_t *self);
+static expr_t *assignment_expression(cc3_t *self);
+static expr_t *expression(cc3_t *self);
+static int constant_expression(cc3_t *self);
 
-void primary_expression(cc3_t *self)
+expr_t *primary_expression(cc3_t *self)
 {
     tk_t *tk = next(self);
+    expr_t *expr;
 
     switch (tk->type) {
     case TK_IDENTIFIER:
+        expr = make_sym(&self->sema, tk);
+        break;
     case TK_CONSTANT:
+        expr = make_const(tk);
+        break;
     case TK_STR_LIT:
+        expr = make_str_lit(tk);
         break;
     case TK_LPAREN:
-        expression(self);
+        expr = expression(self);
         want(self, TK_RPAREN);
         break;
     default:
         err("Invalid primary expression %s", tk_str(tk));
     }
+
+    return expr;
 }
 
-void postfix_expression(cc3_t *self)
+expr_t *postfix_expression(cc3_t *self)
 {
-    primary_expression(self);
+    expr_t *expr = primary_expression(self);
 
     for (;;) {
         if (maybe_want(self, TK_LSQ)) {
-            expression(self);
+            expr = make_unary(EXPR_DREF,
+                make_binary(EXPR_ADD, expr, expression(self)));
             want(self, TK_RSQ);
             continue;
         }
-
         if (maybe_want(self, TK_LPAREN)) {
-            // Empty argument list
-            if (maybe_want(self, TK_RPAREN))
-                continue;
-
-            // Otherwise we have a comma seperated list of assignment-expressions
-            do
-                assignment_expression(self);
-            while (maybe_want(self, TK_COMMA));
-
-            want(self, TK_RPAREN);
+            expr_t *args = NULL, **tail = &args;
+            if (!maybe_want(self, TK_RPAREN)) {
+                do {
+                    *tail = assignment_expression(self);
+                    tail = &(*tail)->next;
+                } while (maybe_want(self, TK_COMMA));
+                want(self, TK_RPAREN);
+            }
+            expr = make_binary(EXPR_CALL, expr, args);
             continue;
         }
-
         if (maybe_want(self, TK_DOT)) {
             want(self, TK_IDENTIFIER);
+            ASSERT_NOT_REACHED();               // FIXME
             continue;
         }
-
         if (maybe_want(self, TK_ARROW)) {
             want(self, TK_IDENTIFIER);
+            ASSERT_NOT_REACHED();               // FIXME
             continue;
         }
-
-        if (maybe_want(self, TK_INCR))
-            ;
-
-        if (maybe_want(self, TK_DECR))
-            ;
-
-        break;
+        if (maybe_want(self, TK_INCR)) {
+            ASSERT_NOT_REACHED();               // FIXME
+            continue;
+        }
+        if (maybe_want(self, TK_DECR)) {
+            ASSERT_NOT_REACHED();               // FIXME
+            continue;
+        }
+        // FIXME: recognize compound literals here
+        return expr;
     }
-
-    // FIXME: recognize compound literals here
 }
 
-void unary_expression(cc3_t *self)
+expr_t *unary_expression(cc3_t *self)
 {
-    if (maybe_want(self, TK_INCR))
-        unary_expression(self);
-    else if (maybe_want(self, TK_DECR))
-        unary_expression(self);
-    else if (maybe_want(self, TK_AND))
-        cast_expression(self);
-    else if (maybe_want(self, TK_MUL))
-        cast_expression(self);
-    else if (maybe_want(self, TK_ADD))
-        cast_expression(self);
-    else if (maybe_want(self, TK_SUB))
-        cast_expression(self);
-    else if (maybe_want(self, TK_NOT))
-        cast_expression(self);
-    else if (maybe_want(self, TK_LNOT))
-        cast_expression(self);
-    else
-        postfix_expression(self);
-
+    static expr_t one = { .kind = EXPR_CONST, .val = 1 };
+    if (maybe_want(self, TK_INCR)) {
+        expr_t *arg = unary_expression(self);
+        return make_binary(EXPR_AS, arg, make_binary(EXPR_ADD, arg, &one));
+    } else if (maybe_want(self, TK_DECR)) {
+        expr_t *arg = unary_expression(self);
+        return make_binary(EXPR_AS, arg, make_binary(EXPR_SUB, arg, &one));
+    } else if (maybe_want(self, TK_AND)) {
+        return make_unary(EXPR_REF, cast_expression(self));
+    } else if (maybe_want(self, TK_MUL)) {
+        return make_unary(EXPR_DREF, cast_expression(self));
+    } else if (maybe_want(self, TK_ADD)) {
+        return cast_expression(self);
+    } else if (maybe_want(self, TK_SUB)) {
+        return make_unary(EXPR_NEG, cast_expression(self));
+    } else if (maybe_want(self, TK_NOT)) {
+        return make_unary(EXPR_NOT, cast_expression(self));
+    } else if (maybe_want(self, TK_LNOT)) {
+        return make_unary(EXPR_LNOT, cast_expression(self));
+    } else {
+        return postfix_expression(self);
+    }
     // FIXME: sizeof unary-expression
     //    and sizeof '(' type-name ')' here
 }
 
-void cast_expression(cc3_t *self)
+expr_t *cast_expression(cc3_t *self)
 {
-    unary_expression(self);
+    return unary_expression(self);
     // FIXME: recognize '(' type-name ')' here
 }
 
-void multiplicative_expression(cc3_t *self)
+expr_t *multiplicative_expression(cc3_t *self)
 {
-    cast_expression(self);
+    expr_t *lhs = cast_expression(self);
     for (;;)
         if (maybe_want(self, TK_MUL))
-            cast_expression(self);
+            lhs = make_binary(EXPR_MUL, lhs, cast_expression(self));
         else if (maybe_want(self, TK_DIV))
-            cast_expression(self);
+            lhs = make_binary(EXPR_DIV, lhs, cast_expression(self));
         else if (maybe_want(self, TK_MOD))
-            cast_expression(self);
+            lhs = make_binary(EXPR_MOD, lhs, cast_expression(self));
         else
-            return;
+            return lhs;
 }
 
-void additive_expression(cc3_t *self)
+expr_t *additive_expression(cc3_t *self)
 {
-    multiplicative_expression(self);
+    expr_t *lhs = multiplicative_expression(self);
     for (;;)
         if (maybe_want(self, TK_ADD))
-            multiplicative_expression(self);
+            lhs = make_binary(EXPR_ADD, lhs, multiplicative_expression(self));
         else if (maybe_want(self, TK_SUB))
-            multiplicative_expression(self);
+            lhs = make_binary(EXPR_SUB, lhs, multiplicative_expression(self));
         else
-            return;
+            return lhs;
 }
 
-void shift_expression(cc3_t *self)
+expr_t *shift_expression(cc3_t *self)
 {
-    additive_expression(self);
+    expr_t *lhs = additive_expression(self);
     for (;;)
         if (maybe_want(self, TK_LSH))
-            additive_expression(self);
+            lhs = make_binary(EXPR_LSH, lhs, additive_expression(self));
         else if (maybe_want(self, TK_RSH))
-            additive_expression(self);
+            lhs = make_binary(EXPR_RSH, lhs, additive_expression(self));
         else
-            return;
+            return lhs;
 }
 
-void relational_expression(cc3_t *self)
+expr_t *relational_expression(cc3_t *self)
 {
-    shift_expression(self);
+    expr_t *lhs = shift_expression(self);
     for (;;)
         if (maybe_want(self, TK_LT))
-            shift_expression(self);
+            lhs = make_binary(EXPR_LT, lhs, shift_expression(self));
         else if (maybe_want(self, TK_GT))
-            shift_expression(self);
+            lhs = make_binary(EXPR_GT, lhs, shift_expression(self));
         else if (maybe_want(self, TK_LE))
-            shift_expression(self);
+            lhs = make_binary(EXPR_LE, lhs, shift_expression(self));
         else if (maybe_want(self, TK_GE))
-            shift_expression(self);
+            lhs = make_binary(EXPR_GE, lhs, shift_expression(self));
         else
-            return;
+            return lhs;
 }
 
-void equality_expression(cc3_t *self)
+expr_t *equality_expression(cc3_t *self)
 {
-    relational_expression(self);
+    expr_t *lhs = relational_expression(self);
     for (;;)
         if (maybe_want(self, TK_EQ))
-            relational_expression(self);
+            lhs = make_binary(EXPR_EQ, lhs, relational_expression(self));
         else if (maybe_want(self, TK_NE))
-            relational_expression(self);
+            lhs = make_binary(EXPR_NE, lhs, relational_expression(self));
         else
-            return;
+            return lhs;
 }
 
-void and_expression(cc3_t *self)
+expr_t *and_expression(cc3_t *self)
 {
-    equality_expression(self);
+    expr_t *lhs = equality_expression(self);
     while (maybe_want(self, TK_AND))
-        equality_expression(self);
+        lhs = make_binary(EXPR_AND, lhs, equality_expression(self));
+    return lhs;
 }
 
-void xor_expression(cc3_t *self)
+expr_t *xor_expression(cc3_t *self)
 {
-    and_expression(self);
+    expr_t *lhs = and_expression(self);
     while (maybe_want(self, TK_XOR))
-        and_expression(self);
+        lhs = make_binary(EXPR_XOR, lhs, and_expression(self));
+    return lhs;
 }
 
-void or_expression(cc3_t *self)
+expr_t *or_expression(cc3_t *self)
 {
-    xor_expression(self);
+    expr_t *lhs = xor_expression(self);
     while (maybe_want(self, TK_OR))
-        xor_expression(self);
+        lhs = make_binary(EXPR_OR, lhs, xor_expression(self));
+    return lhs;
 }
 
-void land_expression(cc3_t *self)
+expr_t *land_expression(cc3_t *self)
 {
-    or_expression(self);
+    expr_t *lhs = or_expression(self);
     while (maybe_want(self, TK_LAND))
-        or_expression(self);
+        lhs = make_binary(EXPR_LAND, lhs, or_expression(self));
+    return lhs;
 }
 
-void lor_expression(cc3_t *self)
+expr_t *lor_expression(cc3_t *self)
 {
-    land_expression(self);
+    expr_t *lhs = land_expression(self);
     while (maybe_want(self, TK_LOR))
-        land_expression(self);
+        lhs = make_binary(EXPR_LOR, lhs, land_expression(self));
+    return lhs;
 }
 
-void conditional_expression(cc3_t *self)
+expr_t *conditional_expression(cc3_t *self)
 {
-    lor_expression(self);
-
+    expr_t *lhs = lor_expression(self);
     if (!maybe_want(self, TK_COND))
-        return;
-
-    expression(self);
-
+        return lhs;
+    expr_t *mid = expression(self);
     want(self, TK_COLON);
-
-    conditional_expression(self);
+    return make_trinary(EXPR_COND, lhs, mid, conditional_expression(self));
 }
 
-void assignment_expression(cc3_t *self)
+expr_t *assignment_expression(cc3_t *self)
 {
-    conditional_expression(self);
-
+    expr_t *lhs = conditional_expression(self);
     if (maybe_want(self, TK_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs, assignment_expression(self));
     else if (maybe_want(self, TK_MUL_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_MUL, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_DIV_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_DIV, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_MOD_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_MOD, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_ADD_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_ADD, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_SUB_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_SUB, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_LSH_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_LSH, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_RSH_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_RSH, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_AND_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_AND, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_XOR_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_XOR, lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_OR_AS))
-        assignment_expression(self);
+        return make_binary(EXPR_AS, lhs,
+                make_binary(EXPR_OR, lhs, assignment_expression(self)));
+    else
+        return lhs;
 }
 
-void expression(cc3_t *self)
+expr_t *expression(cc3_t *self)
 {
-    assignment_expression(self);
+    expr_t *lhs = assignment_expression(self);
     while (maybe_want(self, TK_COMMA))
-        assignment_expression(self);
+        lhs = make_binary(EXPR_SEQ, lhs, assignment_expression(self));
+    return lhs;
 }
 
-void constant_expression(cc3_t *self)
+int constant_expression(cc3_t *self)
 {
     conditional_expression(self);
+    ASSERT_NOT_REACHED();
 }
 
 /** Declarations **/
@@ -318,9 +342,8 @@ static void enumerator_list(cc3_t *self);
 static ty_t *declarator(cc3_t *self, ty_t *ty,
     bool allow_abstract, char **out_name);
 static void type_qualifier_list(cc3_t *self);
-static void initializer(cc3_t *self);
-static void initializer_list(cc3_t *self);
-static void designation(cc3_t *self);
+static expr_t *initializer(cc3_t *self);
+static expr_t *initializer_list(cc3_t *self);
 
 enum {
     TS_VOID, TS_CHAR, TS_SHORT, TS_INT, TS_LONG, TS_FLOAT, TS_DOUBLE,
@@ -592,7 +615,7 @@ void struct_declaration_list(cc3_t *self)
             }
 
             char *name;
-            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
+            declarator(self, clone_ty(base_ty), false, &name);
 
             if (maybe_want(self, TK_COLON))
                 constant_expression(self);
@@ -640,7 +663,7 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
             int cnt = -1;
             // We only allow constant array lengths, as VLA support is left out
             if (!maybe_want(self, TK_RSQ)) {
-                /*cnt = */constant_expression(self);
+                cnt = constant_expression(self);
                 want(self, TK_RSQ);
             }
 
@@ -773,31 +796,8 @@ void type_qualifier_list(cc3_t *self)
         }
 }
 
-void initializer(cc3_t *self)
-{
-    if (maybe_want(self, TK_LCURLY))
-        initializer_list(self);
-    else
-        assignment_expression(self);
-}
-
-void initializer_list(cc3_t *self)
-{
-    for (;;) {
-        designation(self);
-        initializer(self);
-
-        if (maybe_want(self, TK_COMMA)) {
-            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
-                return;
-        } else {
-            want(self, TK_RCURLY);              // Otherwise the list must end
-            return;
-        }
-    }
-}
-
-void designation(cc3_t *self)
+#if 0
+static void designation(cc3_t *self)
 {
     bool match = false;
 
@@ -816,11 +816,46 @@ end:
     if (match)
         want(self, TK_AS);
 }
+#endif
 
+expr_t *initializer(cc3_t *self)
+{
+    // FIXME: implement these
+    // designation(self);
+
+    if (maybe_want(self, TK_LCURLY))
+        return make_unary(EXPR_INIT, initializer_list(self));
+    else
+        return assignment_expression(self);
+}
+
+expr_t *initializer_list(cc3_t *self)
+{
+    expr_t *head = NULL, **tail = &head;
+    for (;;) {
+        // Append initializer to the list
+        *tail = initializer(self);
+        tail = &(*tail)->next;
+        // Check for the end of the list
+        if (maybe_want(self, TK_COMMA)) {
+            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
+                return head;
+        } else {
+            want(self, TK_RCURLY);              // Otherwise the list must end
+            return head;
+        }
+    }
+}
 
 /** Statements **/
 
-static bool declaration(cc3_t *self)
+static inline void append_stmt(stmt_t ***tail, stmt_t *stmt)
+{
+    **tail = stmt;
+    *tail = &(**tail)->next;
+}
+
+static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
 {
     int sc;
     ty_t *base_ty = declaration_specifiers(self, &sc);
@@ -829,21 +864,30 @@ static bool declaration(cc3_t *self)
         return false;
 
     if (!maybe_want(self, TK_SEMICOLON)) {
-
         do {
             // Read declarator
             char *name;
             ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
 
             // Trigger semantic action
-            sema_declare(&self->sema, sc, ty, name);
+            sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
-            // Read initializer
-            if (maybe_want(self, TK_AS))
-                initializer(self);
+            if (maybe_want(self, TK_AS)) {
+                // Read initializer
+                expr_t *expr = initializer(self);
 
+                // Add local initialization "statement" if the target is local
+                if (sym->offset != -1) {
+                    stmt_t *stmt = make_stmt(STMT_INIT);
+                    stmt->offset = sym->offset;
+                    stmt->arg1 = expr;
+                    append_stmt(tail, stmt);
+                } else {
+                    // FIXME: add static data
+                    ASSERT_NOT_REACHED();
+                }
+            }
         } while (maybe_want(self, TK_COMMA));
-
         // Declarators must end with ;
         want(self, TK_SEMICOLON);
     }
@@ -853,153 +897,202 @@ static bool declaration(cc3_t *self)
     return true;
 }
 
-static void statement(cc3_t *self);
+static void statement(cc3_t *self, stmt_t ***tail);
 
-static void block_item_list(cc3_t *self)
+static inline void block_item_list(cc3_t *self, stmt_t ***tail)
 {
     sema_enter(&self->sema);
     while (!maybe_want(self, TK_RCURLY))
-        if (!declaration(self))
-            statement(self);
+        if (!block_scope_declaration(self, tail))
+            statement(self, tail);
     sema_exit(&self->sema);
 }
 
-void statement(cc3_t *self)
+static inline stmt_t *read_stmt(cc3_t *self)
 {
-    // Statements may be preceeded by labels
+    stmt_t *head = NULL, **tail = &head;
+    statement(self, &tail);
+    return head;
+}
 
-    if (peek(self, 0)->type == TK_IDENTIFIER && peek(self, 1)->type == TK_COLON) {
+void statement(cc3_t *self, stmt_t ***tail)
+{
+    tk_t *tk;
+
+    // Statements may be preceeded by labels
+    if ((tk = peek(self, 0))->type == TK_IDENTIFIER
+            && peek(self, 1)->type == TK_COLON) {
+        stmt_t *stmt = make_stmt(STMT_LABEL);
+        stmt->label = strdup(tk_str(tk));
         adv(self);
         adv(self);
+        append_stmt(tail, stmt);
     } else if (maybe_want(self, TK_CASE)) {
-        constant_expression(self);
+        stmt_t *stmt = make_stmt(STMT_LABEL);
+        stmt->case_val = constant_expression(self);
         want(self, TK_COLON);
+        append_stmt(tail, stmt);
     } else if (maybe_want(self, TK_DEFAULT)) {
         want(self, TK_COLON);
+        append_stmt(tail, make_stmt(STMT_DEFAULT));
     }
 
     // Compound statement
     if (maybe_want(self, TK_LCURLY)) {
-        block_item_list(self);
+        block_item_list(self, tail);
         return;
     }
 
     // If statement
     if (maybe_want(self, TK_IF)) {
+        stmt_t *stmt = make_stmt(STMT_IF);
+
         // Heading
         want(self, TK_LPAREN);
-        expression(self);
+        stmt->arg1 = expression(self);
         want(self, TK_RPAREN);
 
         // Then
-        statement(self);
+        stmt->body1 = read_stmt(self);
 
         // Else
         if (maybe_want(self, TK_ELSE))
-            statement(self);
+            stmt->body2 = read_stmt(self);
 
+        append_stmt(tail, stmt);
         return;
     }
 
     // Switch statement
     if (maybe_want(self, TK_SWITCH)) {
+        stmt_t *stmt = make_stmt(STMT_SWITCH);
+
         // Heading
         want(self, TK_LPAREN);
-        expression(self);
+        stmt->arg1 = expression(self);
         want(self, TK_RPAREN);
 
         // Body
-        statement(self);
+        stmt->body1 = read_stmt(self);
 
+        append_stmt(tail, stmt);
         return;
     }
 
     // While statement
     if (maybe_want(self, TK_WHILE)) {
+        stmt_t *stmt = make_stmt(STMT_WHILE);
+
         // Heading
         want(self, TK_LPAREN);
-        expression(self);
+        stmt->arg1 = expression(self);
         want(self, TK_RPAREN);
 
         // Body
-        statement(self);
+        stmt->body1 = read_stmt(self);
 
+        append_stmt(tail, stmt);
         return;
     }
 
     // Do ... while statement
     if (maybe_want(self, TK_DO)) {
+        stmt_t *stmt = make_stmt(STMT_DO);
+
         // Body
-        statement(self);
+        stmt->body1 = read_stmt(self);
+
         // Condition
         want(self, TK_WHILE);
         want(self, TK_LPAREN);
-        expression(self);
+        stmt->arg1 = expression(self);
         want(self, TK_RPAREN);
         want(self, TK_SEMICOLON);
 
+        append_stmt(tail, stmt);
         return;
     }
 
     // For statement
     if (maybe_want(self, TK_FOR)) {
+        stmt_t *stmt = make_stmt(STMT_FOR);
+
         // Heading
         want(self, TK_LPAREN);
 
         // C99: for creates a scope of it's own
         sema_enter(&self->sema);
 
-        if (!declaration(self))
+        if (!block_scope_declaration(self, tail))
             if (!maybe_want(self, TK_SEMICOLON)) {
-                expression(self);
+                stmt->arg1 = expression(self);
                 want(self, TK_SEMICOLON);
             }
 
         if (!maybe_want(self, TK_SEMICOLON)) {
-            expression(self);
+            stmt->arg2 = expression(self);
             want(self, TK_SEMICOLON);
         }
         if (!maybe_want(self, TK_RPAREN)) {
-            expression(self);
+            stmt->arg3 = expression(self);
             want(self, TK_RPAREN);
         }
 
         // Body
-        statement(self);
+        stmt->body1 = read_stmt(self);
 
         // Exit for scope
         sema_exit(&self->sema);
 
+        append_stmt(tail, stmt);
         return;
     }
 
     // Jumps
     if (maybe_want(self, TK_GOTO)) {
+        stmt_t *stmt = make_stmt(STMT_GOTO);
         want(self, TK_IDENTIFIER);
         want(self, TK_SEMICOLON);
-        return;
-    }
-    if (maybe_want(self, TK_CONTINUE)) {
-        want(self, TK_SEMICOLON);
-        return;
-    }
-    if (maybe_want(self, TK_BREAK)) {
-        want(self, TK_SEMICOLON);
-        return;
-    }
-    if (maybe_want(self, TK_RETURN)) {
-        if (!maybe_want(self, TK_SEMICOLON)) {
-            expression(self);
-            want(self, TK_SEMICOLON);
-        }
+        append_stmt(tail, stmt);
         return;
     }
 
-    // Nothing else left, it must be an expression statement
-    if (!maybe_want(self, TK_SEMICOLON)) {
-        expression(self);
+    if (maybe_want(self, TK_CONTINUE)) {
         want(self, TK_SEMICOLON);
+        append_stmt(tail, make_stmt(STMT_CONTINUE));
+        return;
     }
+
+    if (maybe_want(self, TK_BREAK)) {
+        want(self, TK_SEMICOLON);
+        append_stmt(tail, make_stmt(STMT_BREAK));
+        return;
+    }
+
+    if (maybe_want(self, TK_RETURN)) {
+        stmt_t *stmt = make_stmt(STMT_RETURN);
+        if (!maybe_want(self, TK_SEMICOLON)) {
+            stmt->arg1 = expression(self);
+            want(self, TK_SEMICOLON);
+        }
+        append_stmt(tail, stmt);
+        return;
+    }
+
+    // Expression statement
+    if (!maybe_want(self, TK_SEMICOLON)) {
+        stmt_t *stmt = make_stmt(STMT_EVAL);
+        stmt->arg1 = expression(self);
+        want(self, TK_SEMICOLON);
+        append_stmt(tail, stmt);
+    }
+}
+
+static inline stmt_t *read_block(cc3_t *self)
+{
+    stmt_t *head = NULL, **tail = &head;
+    block_item_list(self, &tail);
+    return head;
 }
 
 void parse(cc3_t *self)
@@ -1014,11 +1107,17 @@ void parse(cc3_t *self)
             ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
 
             // Trigger semantic action
-            sema_declare(&self->sema, sc, ty, name);
+            sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
             // Check for function definition
             if (maybe_want(self, TK_LCURLY)) {
-                block_item_list(self);
+                // HACK!: zero sema's picture of the frame size before
+                // entering the context of a new function
+                self->sema.offset = 0;
+                stmt_t *body = read_block(self);
+                // Then we can generate the function, providing the correct
+                // frame size from the hack above
+                gen_func(&self->gen, sym, self->sema.offset, body);
                 free_ty(base_ty);
                 continue;
             }

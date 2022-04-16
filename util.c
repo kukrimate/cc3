@@ -1,5 +1,57 @@
 #include "cc3.h"
 
+int align(int val, int bound)
+{
+    return (val + bound - 1) / bound * bound;
+}
+
+int unescape(const char *s, const char **end)
+{
+    int val = *s++;
+
+    if (val == '\\')
+        switch ((val = *s++)) {
+        // simple-escape-sequence
+        case '\'':
+        case '"':
+        case '?':
+        case '\\':  break;
+        case 'a':   val = '\a'; break;
+        case 'b':   val = '\b'; break;
+        case 'f':   val = '\f'; break;
+        case 'n':   val = '\n'; break;
+        case 'r':   val = '\r'; break;
+        case 't':   val = '\t'; break;
+        case 'v':   val = '\v'; break;
+
+        // octal-escape-sequence
+        case '0' ... '7':
+            val -= '0';
+            for (int ch;;)
+                switch ((ch = *s++)) {
+                case '0' ... '7':   val = val << 3 | (ch - '0'); break;
+                default:            goto done;
+                }
+
+        // hexadecimal-escape-sequence
+        case 'x':
+            for (int ch;;)
+                switch ((ch = *s++)) {
+                case '0' ... '9':   val = val << 4 | (ch - '0'); break;
+                case 'a' ... 'f':   val = val << 4 | (ch - 'a' + 0xa); break;
+                case 'A' ... 'F':   val = val << 4 | (ch - 'A' + 0xa); break;
+                default:            goto done;
+                }
+
+        default:
+            err("Invalid escape sequence %c", val);
+        }
+
+done:
+    if (end) *end = s;
+    return val;
+}
+
 __attribute__((noreturn)) void err(const char *fmt, ...)
 {
     // Print prefix
@@ -71,16 +123,13 @@ void string_push(string_t *self, char c)
     self->data[self->length] = 0;
 }
 
-void string_printf(string_t *self, const char *fmt, ...)
+void string_vprintf(string_t *self, const char *fmt, va_list ap)
 {
-    va_list ap;
     char buf[4096];
     size_t length;
 
     // Produce formatted string into a local buffer
-    va_start(ap, fmt);
     length = vsnprintf(buf, sizeof buf, fmt, ap);
-    va_end(ap);
 
     // FIXME: we should probably dynamically resize this buffer
     assert(length < sizeof buf);
@@ -93,4 +142,12 @@ void string_printf(string_t *self, const char *fmt, ...)
 
     // And finally copy it
     strcpy(self->data + end, buf);
+}
+
+void string_printf(string_t *self, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    string_vprintf(self, fmt, ap);
+    va_end(ap);
 }

@@ -2,6 +2,7 @@
 #define CC3_H
 
 #include <assert.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -10,6 +11,12 @@
 
 /** Enforce unreachability **/
 #define ASSERT_NOT_REACHED() assert(0)
+
+/** Align (up) val to the nearest multiple of bound **/
+int align(int val, int bound);
+
+/** Decode a string with C escape sequences **/
+int unescape(const char *s, const char **end);
 
 /** Exit with an error message **/
 __attribute__((noreturn)) void err(const char *fmt, ...);
@@ -29,6 +36,7 @@ void string_free(string_t *self);
 void string_clear(string_t *self);
 void string_reserve(string_t *self, size_t new_capacity);
 void string_push(string_t *self, char c);
+void string_vprintf(string_t *self, const char *fmt, va_list ap);
 void string_printf(string_t *self, const char *fmt, ...);
 
 /** Tokens **/
@@ -193,7 +201,6 @@ enum {
     TY_DOUBLE,
     TY_LDOUBLE,
     TY_BOOL,
-    TY_STRUCT,
     TY_POINTER,
     TY_ARRAY,
     TY_FUNCTION,
@@ -203,8 +210,6 @@ typedef struct ty ty_t;
 
 struct ty {
     ty_t *next;
-
-    int rc;
 
     int kind;
 
@@ -235,6 +240,8 @@ ty_t *make_function(ty_t *ret_ty, ty_t *param_tys, bool var);
 ty_t *clone_ty(ty_t *ty);
 void free_ty(ty_t *ty);
 
+int ty_size(ty_t *ty);
+
 void print_ty(ty_t *ty);
 
 /** Symbol table **/
@@ -247,6 +254,8 @@ struct sym {
     int sc;
     ty_t *ty;
     char *name;
+
+    int offset;
 };
 
 typedef struct scope scope_t;
@@ -262,13 +271,150 @@ typedef struct sema sema_t;
 
 struct sema {
     scope_t *scope;
+    int offset;
 };
 
+void sema_init(sema_t *self);
+void sema_free(sema_t *self);
 void sema_enter(sema_t *self);
 void sema_exit(sema_t *self);
-void sema_declare(sema_t *self, int sc, struct ty *ty, char *name);
+sym_t *sema_declare(sema_t *self, int sc, struct ty *ty, char *name);
 sym_t *sema_lookup(sema_t *self, const char *name);
 struct ty *sema_findtypedef(sema_t *self, const char *name);
+
+/** Expressions **/
+
+enum {
+    // Global variable
+    EXPR_GLOBAL,
+    // Local variable
+    EXPR_LOCAL,
+    // Constant
+    EXPR_CONST,
+    // String literal
+    EXPR_STR_LIT,
+
+    EXPR_MEMB,  // Member access
+    EXPR_CALL,  // Function call
+
+    EXPR_REF,   // Pointer creation
+    EXPR_DREF,  // Pointer indirection
+
+    EXPR_NEG,   // Unary arithmetic
+    EXPR_NOT,
+
+    EXPR_MUL,   // Binary arithmetic
+    EXPR_DIV,
+    EXPR_MOD,
+    EXPR_ADD,
+    EXPR_SUB,
+    EXPR_LSH,
+    EXPR_RSH,
+    EXPR_AND,
+    EXPR_XOR,
+    EXPR_OR,
+
+    EXPR_LT,    // Boolean expressions
+    EXPR_GT,
+    EXPR_LE,
+    EXPR_GE,
+    EXPR_EQ,
+    EXPR_NE,
+    EXPR_LNOT,
+    EXPR_LAND,
+    EXPR_LOR,
+
+    EXPR_AS,    // Assignment
+    EXPR_COND,  // Conditional
+    EXPR_SEQ,   // Comma operator
+
+    EXPR_INIT,  // Initializer list
+};
+
+typedef struct expr expr_t;
+typedef unsigned long long val_t;
+
+struct expr {
+    expr_t *next;
+
+    int kind;
+
+    // Type
+    ty_t *ty;
+
+    // Value
+    int offset;
+    char *str;
+    val_t val;
+
+    // Arguments
+    expr_t *arg1, *arg2, *arg3;
+};
+
+expr_t *make_sym(sema_t *self, tk_t *tk);
+expr_t *make_const(tk_t *tk);
+expr_t *make_str_lit(tk_t *tk);
+
+expr_t *make_unary(int kind, expr_t *arg1);
+expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2);
+expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3);
+
+/** Statements **/
+
+enum {
+    STMT_LABEL,
+    STMT_CASE,
+    STMT_DEFAULT,
+    STMT_IF,
+    STMT_SWITCH,
+    STMT_WHILE,
+    STMT_DO,
+    STMT_FOR,
+    STMT_GOTO,
+    STMT_CONTINUE,
+    STMT_BREAK,
+    STMT_RETURN,
+    STMT_INIT,
+    STMT_EVAL,
+};
+
+typedef struct stmt stmt_t;
+
+struct stmt {
+    stmt_t *next;
+
+    int kind;
+
+    const char *label;          // Goto label
+    int case_val;               // Case label
+    int offset;                 // Local variable to initialize
+    
+    expr_t *arg1, *arg2, *arg3; // Expression arguments
+    stmt_t *body1, *body2;      // Statement list arguments
+};
+
+stmt_t *make_stmt(int kind);
+
+/** Code generation **/
+
+typedef struct gen gen_t;
+
+struct gen {
+    // Size of the current frame
+    int offset;
+    // State of the current function
+    int label_cnt;
+    // Number of string literals
+    int str_lit_cnt;
+    // Output code and data
+    string_t code;
+    string_t data;
+};
+
+void gen_init(gen_t *self);
+void gen_free(gen_t *self);
+char *gen_str_lit(gen_t *self, tk_t *tk);
+void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body);
 
 /** Parser **/
 
@@ -277,6 +423,7 @@ typedef struct cc3 cc3_t;
 struct cc3 {
     lexer_t lexer;
     sema_t sema;
+    gen_t gen;
 };
 
 void parse(cc3_t *self);

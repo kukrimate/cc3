@@ -3,25 +3,21 @@
 ty_t *make_ty(int kind)
 {
     ty_t *ty = calloc(1, sizeof *ty);
-    ty->rc = 1;
+    if (!ty) abort();
     ty->kind = kind;
     return ty;
 }
 
 ty_t *make_pointer(ty_t *base_ty)
 {
-    ty_t *ty = calloc(1, sizeof *ty);
-    ty->rc = 1;
-    ty->kind = TY_POINTER;
+    ty_t *ty = make_ty(TY_POINTER);
     ty->pointer.base_ty = base_ty;
     return ty;
 }
 
 ty_t *make_array(ty_t *elem_ty, int cnt)
 {
-    ty_t *ty = calloc(1, sizeof *ty);
-    ty->rc = 1;
-    ty->kind = TY_ARRAY;
+    ty_t *ty = make_ty(TY_ARRAY);
     ty->array.elem_ty = elem_ty;
     ty->array.cnt = cnt;
     return ty;
@@ -46,9 +42,7 @@ ty_t *make_param(ty_t *ty)
 
 ty_t *make_function(ty_t *ret_ty, ty_t *param_tys, bool var)
 {
-    ty_t *ty = calloc(1, sizeof *ty);
-    ty->rc = 1;
-    ty->kind = TY_FUNCTION;
+    ty_t *ty = make_ty(TY_FUNCTION);
     if (ret_ty->kind == TY_ARRAY)
         err("Function returning array");
     if (ret_ty->kind == TY_FUNCTION)
@@ -95,6 +89,59 @@ ty_t *clone_ty(ty_t *ty)
         return make_function(clone_ty(ty->function.ret_ty), param_tys, ty->function.var);
     }
 
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+int ty_align(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:       return 1;
+    case TY_SCHAR:      return 1;
+    case TY_UCHAR:      return 1;
+    case TY_SHORT:      return 2;
+    case TY_USHORT:     return 2;
+    case TY_INT:        return 4;
+    case TY_UINT:       return 4;
+    case TY_LONG:       return 8;
+    case TY_ULONG:      return 8;
+    case TY_LLONG:      return 8;
+    case TY_ULLONG:     return 8;
+    case TY_FLOAT:      return 4;
+    case TY_DOUBLE:     return 8;
+    case TY_LDOUBLE:    return 16;
+    case TY_BOOL:       return 1;
+    case TY_POINTER:    return 8;
+    case TY_ARRAY:
+        return ty_align(ty->array.elem_ty);
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+int ty_size(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:       return 1;
+    case TY_SCHAR:      return 1;
+    case TY_UCHAR:      return 1;
+    case TY_SHORT:      return 2;
+    case TY_USHORT:     return 2;
+    case TY_INT:        return 4;
+    case TY_UINT:       return 4;
+    case TY_LONG:       return 8;
+    case TY_ULONG:      return 8;
+    case TY_LLONG:      return 8;
+    case TY_ULLONG:     return 8;
+    case TY_FLOAT:      return 4;
+    case TY_DOUBLE:     return 8;
+    case TY_LDOUBLE:    return 16;
+    case TY_BOOL:       return 1;
+    case TY_POINTER:    return 8;
+    case TY_ARRAY:
+        assert(ty->array.cnt != -1);
+        return ty_size(ty->array.elem_ty) * ty->array.cnt;
     default:
         ASSERT_NOT_REACHED();
     }
@@ -204,6 +251,17 @@ void print_ty(ty_t *ty)
     printf("\n");
 }
 
+void sema_init(sema_t *self)
+{
+    self->scope = NULL;
+    sema_enter(self);
+}
+
+void sema_free(sema_t *self)
+{
+    sema_exit(self);
+}
+
 void sema_enter(sema_t *self)
 {
     scope_t *scope = calloc(1, sizeof *scope);
@@ -233,7 +291,7 @@ void sema_exit(sema_t *self)
     free(scope);
 }
 
-void sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
+sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
 {
     struct sym *sym;
 
@@ -256,8 +314,22 @@ void sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     sym->ty = ty;
     sym->name = name;
 
+    if (self->scope->parent) {
+        // First align the stack
+        self->offset = align(self->offset, ty_align(ty));
+        // Then we can allocate space for the variable
+        sym->offset = self->offset;
+        self->offset += ty_size(ty);
+    } else {
+        sym->offset = -1;
+    }
+
+/*
     printf("Declare %s as ", name);
     print_ty(ty);
+*/
+
+    return sym;
 }
 
 sym_t *sema_lookup(sema_t *self, const char *name)
@@ -276,4 +348,179 @@ ty_t *sema_findtypedef(sema_t *self, const char *name)
         return clone_ty(sym->ty);
     }
     return NULL;
+}
+
+static expr_t *make_expr(int kind)
+{
+    expr_t *expr = calloc(1, sizeof *expr);
+    if (!expr) abort();
+    expr->kind = kind;
+    return expr;
+}
+
+expr_t *make_sym(sema_t *self, tk_t *tk)
+{
+    sym_t *sym = sema_lookup(self, tk_str(tk));
+
+    // Find symbol
+    if (!sym)
+        err("Undeclared identifier %s", tk_str(tk));
+
+    // Create expression based on symbol type
+    expr_t *expr;
+    if (sym->offset == -1) {
+        expr = make_expr(EXPR_GLOBAL);
+        expr->str = strdup(sym->name);
+    } else {
+        expr = make_expr(EXPR_LOCAL);
+        expr->offset = sym->offset;
+    }
+    expr->ty = clone_ty(sym->ty);
+    return expr;
+}
+
+expr_t *make_const(tk_t *tk)
+{
+    expr_t *expr = make_expr(EXPR_CONST);
+    const char *spelling = tk_str(tk);
+    expr->ty = make_ty(TY_INT);
+    if (*spelling == '\'') {    // Character constant
+        ++spelling;
+        while (*spelling != '\'')
+            expr->val = expr->val << 8 | unescape(spelling, &spelling);
+    } else {                    // Integer constant
+        // Decode value
+        errno = 0;
+        char *end;
+        expr->val = strtoull(spelling, &end, 0);
+        if (errno || *end)  // FIXME: decode suffix
+            err("Invalid integer constant %s", spelling);
+    }
+    return expr;
+}
+
+expr_t *make_str_lit(tk_t *tk)
+{
+    expr_t *expr = make_expr(EXPR_STR_LIT);
+    string_t str;
+    string_init(&str);
+    const char *spelling = tk_str(tk);
+    ++spelling;
+    while (*spelling != '\"')
+        string_push(&str, unescape(spelling, &spelling));
+    expr->ty = make_array(make_ty(TY_CHAR), str.length + 1);
+    expr->str = str.data;
+    return expr;
+}
+
+// Does values of type ty degrade to a pointer type
+// and if so what is the base type of said pointer?
+static ty_t *pointer_to_what(ty_t *ty)
+{
+    if (ty->kind == TY_POINTER)           // Actually a pointer
+        return ty->pointer.base_ty;
+    else if (ty->kind == TY_ARRAY)        // Degrades to pointer
+        return ty->array.elem_ty;
+    else if (ty->kind == TY_FUNCTION)     // Degrades to pointer
+        return ty;
+    else
+        return NULL;
+}
+
+expr_t *make_unary(int kind, expr_t *arg1)
+{
+    expr_t *expr = make_expr(kind);
+    switch (kind) {
+    case EXPR_REF:                                  // Non-lvalues will be caught later
+        expr->ty = make_pointer(arg1->ty);
+        break;
+    case EXPR_DREF:
+        if (!(expr->ty = pointer_to_what(arg1->ty)))
+            err("Pointer required");
+        break;
+    case EXPR_NEG:
+    case EXPR_NOT:
+        expr->ty = arg1->ty;
+        break;
+    case EXPR_LNOT:
+        expr->ty = make_ty(TY_INT);
+        break;
+    default:
+        ASSERT_NOT_REACHED();
+    }
+    expr->arg1 = arg1;
+    return expr;
+}
+
+expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
+{
+    expr_t *expr = make_expr(kind);
+
+    switch (kind) {
+    case EXPR_CALL:
+    {
+        ty_t *func_ty = pointer_to_what(arg1->ty);
+        if (!func_ty || func_ty->kind != TY_FUNCTION)
+            err("Non-function object called");
+        expr->ty = func_ty->function.ret_ty;
+        break;
+    }
+
+    case EXPR_ADD:
+    case EXPR_SUB:
+    case EXPR_MUL:
+    case EXPR_DIV:
+    case EXPR_MOD:
+    case EXPR_LSH:
+    case EXPR_RSH:
+    case EXPR_AND:
+    case EXPR_XOR:
+    case EXPR_OR:
+        expr->ty = arg1->ty;
+        break;
+
+    case EXPR_LT:
+    case EXPR_GT:
+    case EXPR_LE:
+    case EXPR_GE:
+    case EXPR_EQ:
+    case EXPR_NE:
+    case EXPR_LAND:
+    case EXPR_LOR:
+        expr->ty = make_ty(TY_INT);
+        break;
+
+    case EXPR_AS:
+        expr->ty = arg1->ty;
+        break;
+
+    case EXPR_SEQ:
+        expr->ty = arg2->ty;
+        break;
+
+    default:
+        ASSERT_NOT_REACHED();
+    }
+    expr->arg1 = arg1;
+    expr->arg2 = arg2;
+    return expr;
+}
+
+expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
+{
+    expr_t *expr = make_expr(kind);
+    assert(kind == EXPR_COND);
+    expr->ty = arg2->ty;
+    expr->arg1 = arg1;
+    expr->arg2 = arg2;
+    expr->arg3 = arg3;
+    return expr;
+}
+
+stmt_t *make_stmt(int kind)
+{
+    stmt_t *stmt = calloc(1, sizeof *stmt);
+    if (!stmt) abort();
+    stmt->kind = kind;
+    return stmt;
 }
