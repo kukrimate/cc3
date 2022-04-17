@@ -78,7 +78,9 @@ void gen_addr(gen_t *self, expr_t *expr)
             emit_str_lit(self, expr->str);
             break;
         case EXPR_MEMB:
-            emit_code(self, "add rax, %d\n", expr->offset);
+            gen_addr(self, expr->arg1);
+            if (expr->offset)
+                emit_code(self, "add rax, %d\n", expr->offset);
             break;
         case EXPR_DREF:
             gen_value(self, expr);

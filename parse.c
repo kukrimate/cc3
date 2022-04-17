@@ -109,13 +109,13 @@ expr_t *postfix_expression(cc3_t *self)
             continue;
         }
         if (maybe_want(self, TK_DOT)) {
-            want(self, TK_IDENTIFIER);
-            ASSERT_NOT_REACHED();               // FIXME
+            const char *name = tk_str(want(self, TK_IDENTIFIER));
+            expr = make_memb_expr(expr, name);
             continue;
         }
         if (maybe_want(self, TK_ARROW)) {
-            want(self, TK_IDENTIFIER);
-            ASSERT_NOT_REACHED();               // FIXME
+            const char *name = tk_str(want(self, TK_IDENTIFIER));
+            expr = make_memb_expr(make_unary(EXPR_DREF, expr), name);
             continue;
         }
         if (maybe_want(self, TK_INCR)) {
@@ -337,13 +337,107 @@ int constant_expression(cc3_t *self)
 /** Declarations **/
 
 static ty_t *declaration_specifiers(cc3_t *self, int *out_sc);
-static void struct_declaration_list(cc3_t *self);
-static void enumerator_list(cc3_t *self);
-static ty_t *declarator(cc3_t *self, ty_t *ty,
-    bool allow_abstract, char **out_name);
+static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_name);
 static void type_qualifier_list(cc3_t *self);
 static expr_t *initializer(cc3_t *self);
 static expr_t *initializer_list(cc3_t *self);
+
+static ty_t *struct_declaration_list(cc3_t *self, int kind)
+{
+    // Read member list
+    memb_t *members = NULL, **tail = &members;
+    do {
+        int sc;
+        ty_t *base_ty = declaration_specifiers(self, &sc);
+        if (!base_ty)
+            err("Expected declaration in struct");
+        if (sc != -1)
+            err("Storage class in struct declaration");
+        do {
+/* FIXME: implement bitfields
+            if (maybe_want(self, TK_COLON)) {   // Anonymous bitfield
+                constant_expression(self);
+                continue;
+            }
+*/
+            char *name;
+            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
+            *tail = make_memb(ty, name);
+/*
+            if (maybe_want(self, TK_COLON))
+                constant_expression(self);
+*/
+            tail = &(*tail)->next;
+        } while (!maybe_want(self, TK_SEMICOLON));
+        free_ty(base_ty);   // Was cloned for each declaration
+    } while (!maybe_want(self, TK_RCURLY));
+
+    // Create struct/union type
+    return make_struct(kind, members);
+}
+
+static ty_t *struct_specifier(cc3_t *self, int kind)
+{
+    tk_t *tk;
+    if ((tk = maybe_want(self, TK_IDENTIFIER))) {
+        char *name = strdup(tk_str(tk));
+        if (maybe_want(self, TK_LCURLY)) {
+            // Tagged struct/union defintion
+            return sema_declare_tag(&self->sema,
+                struct_declaration_list(self, kind), name);
+        } else {
+            // Forward declaration
+            return sema_forward_declare_tag(&self->sema, name);
+        }
+        free(name);
+    } else {
+        // It's an anonymous struct/union definition
+        want(self, TK_LCURLY);
+        return struct_declaration_list(self, kind);
+    }
+}
+
+static ty_t *enumerator_list(cc3_t *self)
+{
+    for (;;) {
+        // Read enumerator name
+        want(self, TK_IDENTIFIER);
+
+        // Optionally there might be a value
+        if (maybe_want(self, TK_AS))
+            constant_expression(self);
+
+        if (maybe_want(self, TK_COMMA)) {
+            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
+                goto end;
+        } else {
+            want(self, TK_RCURLY);              // Otherwise the list must end
+            goto end;
+        }
+    }
+end:
+    return make_ty(TY_INT);                     // enums have type int
+}
+
+static ty_t *enum_specifier(cc3_t *self)
+{
+    tk_t *tk;
+    if ((tk = maybe_want(self, TK_IDENTIFIER))) {
+        char *name = strdup(tk_str(tk));
+        if (maybe_want(self, TK_LCURLY)) {
+            // Tagged enum defintion
+            return sema_declare_tag(&self->sema, enumerator_list(self), name);
+        } else {
+            // Forward declaration
+            return sema_forward_declare_tag(&self->sema, name);
+        }
+        free(name);
+    } else {
+        // Anonymous enum definition
+        want(self, TK_LCURLY);
+        return enumerator_list(self);
+    }
+}
 
 enum {
     TS_VOID, TS_CHAR, TS_SHORT, TS_INT, TS_LONG, TS_FLOAT, TS_DOUBLE,
@@ -429,7 +523,7 @@ static ty_t *decode_ts(int ts[static NUM_TS])
     err("Provided type specifiers do not name a valid type");
 }
 
-static ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
+ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
 {
     bool match = false;
 
@@ -457,6 +551,16 @@ static ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
             if (*out_sc != -1)
                 err("Duplicate storage class");
             *out_sc = tk->type;
+            break;
+
+        // Type qualifier
+        case TK_CONST:
+        case TK_RESTRICT:
+        case TK_VOLATILE:
+            break;
+
+        // Function specifier
+        case TK_INLINE:
             break;
 
         // Type specifier
@@ -520,130 +624,50 @@ static ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
             had_ts = true;
             ++ts[TS_IMAGINARY];
             break;
-
         case TK_STRUCT:
+            if (ty || had_ts) err("Invalid type specifiers");
+            adv(self);
+            ty = struct_specifier(self, TY_STRUCT);
+            goto set_match;
         case TK_UNION:
+            if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-
-            if (ty || had_ts)
-                err("Invalid type specifiers");
-
-            // Might be followed by an identifier
-            if ((tk = maybe_want(self, TK_IDENTIFIER)))
-                ;
-
-            // Read member declarations if present
-            if (maybe_want(self, TK_LCURLY))
-                struct_declaration_list(self);
-
-            continue;
-
+            ty = struct_specifier(self, TY_UNION);
+            goto set_match;
         case TK_ENUM:
+            if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-
-            if (ty || had_ts)
-                err("Invalid type specifiers");
-
-            // Might be followed by an identifier
-            if ((tk = maybe_want(self, TK_IDENTIFIER)))
-                ;
-
-            // Read enumerators if present
-            if (maybe_want(self, TK_LCURLY))
-                enumerator_list(self);
-
-            continue;
-
-        // FIXME: add typedef names
-
-        // Type qualifier
-        case TK_CONST:
-        case TK_RESTRICT:
-        case TK_VOLATILE:
-            break;
-
-        // Function specifier
-        case TK_INLINE:
-            break;
+            ty = enum_specifier(self);
+            goto set_match;
 
         // Might be a typedef name
         case TK_IDENTIFIER:
-            // Ignore identifier if we already have a type
-            if (ty || had_ts)
-                goto end_decl_specs;
+            // If there were no type specifiers, we lookup the identifier
+            // to see if it's a typedef name
+            if (!ty && !had_ts)
+                if ((ty = sema_findtypedef(&self->sema, tk_str(tk))))
+                    break;
 
-            // Otherwise it might become a type
-            if ((ty = sema_findtypedef(&self->sema, tk_str(tk))))
-                break;
-
+            // If it's not a typedef name we
             // FALLTHROUGH
 
         // End of declaration specifiers
         default:
-        end_decl_specs:
 
-            if (!match)         // No type provided
+            if (!match)             // No type provided
                 return NULL;
 
-            if (ty)             // Struct, union, enum, or typedef
+            if (ty)                 // Struct, union, enum, or typedef
                 return ty;
 
-            return decode_ts(ts);
+            return decode_ts(ts);   // Otherwise it's a normal multiset
         }
 
         // Consume token
         adv(self);
-
+set_match:
         // Note that we've matched something
         match = true;
-    }
-}
-
-void struct_declaration_list(cc3_t *self)
-{
-    do {
-        int sc;
-        ty_t *base_ty = declaration_specifiers(self, &sc);
-
-        if (!base_ty)
-            err("Expected declaration in struct");
-
-        do {
-            if (maybe_want(self, TK_COLON)) {   // Anonymous bitfield
-                constant_expression(self);
-                continue;
-            }
-
-            char *name;
-            declarator(self, clone_ty(base_ty), false, &name);
-
-            if (maybe_want(self, TK_COLON))
-                constant_expression(self);
-
-        } while (!maybe_want(self, TK_SEMICOLON));
-
-        free_ty(base_ty);
-
-    } while (!maybe_want(self, TK_RCURLY));
-}
-
-void enumerator_list(cc3_t *self)
-{
-    for (;;) {
-        // Read enumerator name
-        want(self, TK_IDENTIFIER);
-
-        // Optionally there might be a value
-        if (maybe_want(self, TK_AS))
-            constant_expression(self);
-
-        if (maybe_want(self, TK_COMMA)) {
-            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
-                return;
-        } else {
-            want(self, TK_RCURLY);              // Otherwise the list must end
-            return;
-        }
     }
 }
 
@@ -1137,12 +1161,12 @@ void parse(cc3_t *self)
                 if (maybe_want(self, TK_AS))
                     initializer(self);
             }
+
+            // The list must end with a ;
+            want(self, TK_SEMICOLON);
         }
 
         // Free base type
         free_ty(base_ty);
-
-        // And the list must end with a ;
-        want(self, TK_SEMICOLON);
     }
 }

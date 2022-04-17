@@ -201,12 +201,26 @@ enum {
     TY_DOUBLE,
     TY_LDOUBLE,
     TY_BOOL,
+    TY_STRUCT,
+    TY_UNION,
     TY_POINTER,
     TY_ARRAY,
     TY_FUNCTION,
 };
 
 typedef struct ty ty_t;
+typedef struct memb memb_t;
+
+struct memb {
+    memb_t *next;
+
+    ty_t *ty;
+    char *name;
+
+    int offset;
+};
+
+memb_t *make_memb(ty_t *ty, char *name);
 
 struct ty {
     ty_t *next;
@@ -214,6 +228,12 @@ struct ty {
     int kind;
 
     union {
+        struct {
+            int align;
+            int size;
+            memb_t *members;
+        } stru;
+
         struct {
             ty_t *base_ty;
         } pointer;
@@ -232,6 +252,7 @@ struct ty {
 };
 
 ty_t *make_ty(int kind);
+ty_t *make_struct(int kind, memb_t *members);
 ty_t *make_pointer(ty_t *base_ty);
 ty_t *make_array(ty_t *elem_ty, int cnt);
 ty_t *make_param(ty_t *ty);
@@ -239,8 +260,6 @@ ty_t *make_function(ty_t *ret_ty, ty_t *param_tys, bool var);
 
 ty_t *clone_ty(ty_t *ty);
 void free_ty(ty_t *ty);
-
-int ty_size(ty_t *ty);
 
 void print_ty(ty_t *ty);
 
@@ -258,11 +277,21 @@ struct sym {
     int offset;
 };
 
+typedef struct tag tag_t;
+
+struct tag {
+    tag_t *next;
+
+    ty_t *ty;
+    char *name;
+};
+
 typedef struct scope scope_t;
 
 struct scope {
     scope_t *parent;
     sym_t *syms;
+    tag_t *tags;
 };
 
 /** Semantic actions **/
@@ -278,9 +307,19 @@ void sema_init(sema_t *self);
 void sema_free(sema_t *self);
 void sema_enter(sema_t *self);
 void sema_exit(sema_t *self);
-sym_t *sema_declare(sema_t *self, int sc, struct ty *ty, char *name);
+
+// Declare a name
+sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name);
+// Lookup a declaration in any scope
 sym_t *sema_lookup(sema_t *self, const char *name);
-struct ty *sema_findtypedef(sema_t *self, const char *name);
+// Lookup a name in any scope, if it is a typedef, return its type
+ty_t *sema_findtypedef(sema_t *self, const char *name);
+
+// Forward declare a tag
+ty_t *sema_forward_declare_tag(sema_t *self, const char *name);
+
+// Declare a tag with a type
+ty_t *sema_declare_tag(sema_t *self, ty_t *ty, const char *name);
 
 /** Expressions **/
 
@@ -356,6 +395,7 @@ expr_t *make_const(tk_t *tk);
 expr_t *make_str_lit(tk_t *tk);
 
 expr_t *make_unary(int kind, expr_t *arg1);
+expr_t *make_memb_expr(expr_t *arg1, const char *name);
 expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2);
 expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3);
 
