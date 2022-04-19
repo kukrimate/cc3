@@ -266,14 +266,24 @@ void print_ty(ty_t *ty);
 
 /** Symbol table **/
 
+enum {
+    SYM_TYPEDEF,
+    SYM_EXTERN,
+    SYM_STATIC,
+    SYM_LOCAL,
+};
+
 typedef struct sym sym_t;
 
 struct sym {
     sym_t *next;
 
-    int sc;
+    int kind;
+
     ty_t *ty;
     char *name;
+
+    bool had_def;
 
     int offset;
 };

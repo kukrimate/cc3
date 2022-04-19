@@ -430,14 +430,37 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
         self->scope->syms = sym;
     }
 
-    // Cannot declare stuff as void
+    // Names cannot be declared as void
     if (ty->kind == TY_VOID)
         err("Tried to declare %s with type void", name);
 
-    sym->sc = sc;
+    // Figure out symbol type from storage class
+    switch (sc) {
+    case TK_TYPEDEF:
+        sym->kind = SYM_TYPEDEF;
+        break;
+    case TK_EXTERN:
+        sym->kind = SYM_EXTERN;
+        break;
+    case TK_STATIC:
+        sym->kind = SYM_STATIC;
+        break;
+    case TK_AUTO:
+    case TK_REGISTER:
+        sym->kind = SYM_LOCAL;
+        break;
+    case -1:
+        if (self->scope->parent)
+            sym->kind = SYM_LOCAL;
+        else
+            sym->kind = SYM_EXTERN;
+        break;
+    default:
+        ASSERT_NOT_REACHED();
+    }
+
     sym->ty = ty;
     sym->name = name;
-
 
     // Debug
     printf("Declare %s as ", name);
@@ -468,7 +491,7 @@ sym_t *sema_lookup(sema_t *self, const char *name)
 ty_t *sema_findtypedef(sema_t *self, const char *name)
 {
     struct sym *sym = sema_lookup(self, name);
-    if (sym && sym->sc == TK_TYPEDEF) {
+    if (sym && sym->kind == SYM_TYPEDEF) {
         return clone_ty(sym->ty);
     }
     return NULL;

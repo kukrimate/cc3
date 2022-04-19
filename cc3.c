@@ -16,9 +16,15 @@ static void cc3_free(cc3_t *ctx)
 
 static void cc3_write_asm(cc3_t *ctx, FILE *output_file)
 {
+    // Generate text and data section
     fprintf(output_file, "section .text\n%s", ctx->gen.code.data);
     fprintf(output_file, "section .data\n%s", ctx->gen.data.data);
-    // FIXME: dump exports and imports
+
+    // Generate imports and exports
+    for (sym_t *sym = ctx->sema.scope->syms; sym; sym = sym->next)
+        if (sym->kind == SYM_EXTERN)
+            fprintf(output_file, "%s %s\n",
+                sym->had_def ? "global" : "extern", sym->name);
 }
 
 static int do_assemble(cc3_t *ctx, const char *out_path)
@@ -42,7 +48,8 @@ static int do_assemble(cc3_t *ctx, const char *out_path)
 
     // Run assembler
     char cmd[4096];
-    if (snprintf(cmd, sizeof cmd, "nasm -felf64 -o %s %s", out_path, asm_path) >= sizeof cmd) {
+    if (snprintf(cmd, sizeof cmd, "nasm -felf64 -o %s %s", out_path, asm_path)
+            >= sizeof cmd) {
         err = -1;
         goto done;
     }
@@ -74,7 +81,8 @@ static int do_link(cc3_t *ctx, const char *out_path)
 
     // Run linker
     char cmd[4096];
-    if (snprintf(cmd, sizeof cmd, "cc -o %s %s", out_path, obj_path) >= sizeof cmd) {
+    if (snprintf(cmd, sizeof cmd, "cc -no-pie -o %s %s", out_path, obj_path)
+            >= sizeof cmd) {
         err = -1;
         goto done;
     }

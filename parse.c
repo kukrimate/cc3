@@ -1135,6 +1135,8 @@ void parse(cc3_t *self)
 
             // Check for function definition
             if (maybe_want(self, TK_LCURLY)) {
+                // Mark the symbol as having a definition
+                sym->had_def = true;
                 // HACK!: zero sema's picture of the frame size before
                 // entering the context of a new function
                 self->sema.offset = 0;
