@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /** Enforce unreachability **/
 #define ASSERT_NOT_REACHED() assert(0)
