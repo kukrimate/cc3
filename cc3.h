@@ -350,7 +350,8 @@ enum {
     EXPR_REF,   // Pointer creation
     EXPR_DREF,  // Pointer indirection
 
-    EXPR_NEG,   // Unary arithmetic
+    EXPR_POS,   // Unary arithmetic
+    EXPR_NEG,
     EXPR_NOT,
 
     EXPR_MUL,   // Binary arithmetic

@@ -560,24 +560,32 @@ expr_t *make_sym(sema_t *self, tk_t *tk)
     return expr;
 }
 
-expr_t *make_const(tk_t *tk)
+static expr_t *make_const_(ty_t *ty, val_t val)
 {
     expr_t *expr = make_expr(EXPR_CONST);
+    expr->ty = ty;
+    expr->val = val;
+    return expr;
+}
+
+expr_t *make_const(tk_t *tk)
+{
     const char *spelling = tk_str(tk);
-    expr->ty = make_ty(TY_INT);
+    val_t val = 0;
+
     if (*spelling == '\'') {    // Character constant
         ++spelling;
         while (*spelling != '\'')
-            expr->val = expr->val << 8 | unescape(spelling, &spelling);
+            val = val << 8 | unescape(spelling, &spelling);
     } else {                    // Integer constant
         // Decode value
         errno = 0;
         char *end;
-        expr->val = strtoull(spelling, &end, 0);
+        val = strtoull(spelling, &end, 0);
         if (errno || *end)  // FIXME: decode suffix
             err("Invalid integer constant %s", spelling);
     }
-    return expr;
+    return make_const_(make_ty(TY_INT), val);
 }
 
 expr_t *make_str_lit(tk_t *tk)
@@ -594,9 +602,105 @@ expr_t *make_str_lit(tk_t *tk)
     return expr;
 }
 
-// Does values of type ty degrade to a pointer type
-// and if so what is the base type of said pointer?
-static ty_t *pointer_to_what(ty_t *ty)
+// Is ty an integer type?
+static bool is_integer_ty(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_BOOL:
+        return true;
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+    case TY_UNION:
+    case TY_STRUCT:
+    case TY_POINTER:
+    case TY_ARRAY:
+    case TY_FUNCTION:
+        return false;
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+// Is ty an arithmetic type?
+static bool is_arith_ty(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_BOOL:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+        return true;
+    case TY_UNION:
+    case TY_STRUCT:
+    case TY_POINTER:
+    case TY_ARRAY:
+    case TY_FUNCTION:
+        return false;
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+// Is ty a scalar type?
+static bool is_scalar_ty(ty_t *ty)
+{
+    switch (ty->kind) {
+    // By definition scalar
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_BOOL:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+    case TY_POINTER:
+    // Degrade to pointers in expressions
+    case TY_ARRAY:
+    case TY_FUNCTION:
+        return true;
+    // Non-scalar types
+    case TY_UNION:
+    case TY_STRUCT:
+        return false;
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+// Does a value of type ty degrade to a pointer type and if so what is the base
+// type of said pointer?
+static ty_t *find_ptr_base(ty_t *ty)
 {
     if (ty->kind == TY_POINTER)           // Actually a pointer
         return ty->pointer.base_ty;
@@ -610,25 +714,38 @@ static ty_t *pointer_to_what(ty_t *ty)
 
 expr_t *make_unary(int kind, expr_t *arg1)
 {
-    expr_t *expr = make_expr(kind);
+    ty_t *ty;
+
     switch (kind) {
-    case EXPR_REF:                                  // Non-lvalues will be caught later
-        expr->ty = make_pointer(arg1->ty);
+    case EXPR_REF:
+        ty = make_pointer(arg1->ty);
         break;
     case EXPR_DREF:
-        if (!(expr->ty = pointer_to_what(arg1->ty)))
-            err("Pointer required");
+        if (!(ty = find_ptr_base(arg1->ty)))
+            err("Pointer type required");
         break;
+    case EXPR_POS:
+        if (!is_arith_ty((ty = arg1->ty)))
+            err("Arihmetic type required");
+        return arg1;
     case EXPR_NEG:
+        if (!is_arith_ty((ty = arg1->ty)))
+            err("Arihmetic type required");
+        break;
     case EXPR_NOT:
-        expr->ty = arg1->ty;
+        if (!is_integer_ty((ty = arg1->ty)))
+            err("Integer type required");
         break;
     case EXPR_LNOT:
-        expr->ty = make_ty(TY_INT);
+        if (!is_scalar_ty((ty = arg1->ty)))
+        ty = make_ty(TY_INT);
         break;
     default:
         ASSERT_NOT_REACHED();
     }
+
+    expr_t *expr = make_expr(kind);
+    expr->ty = ty;
     expr->arg1 = arg1;
     return expr;
 }
@@ -658,18 +775,47 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     switch (kind) {
     case EXPR_CALL:
     {
-        ty_t *func_ty = pointer_to_what(arg1->ty);
+        ty_t *func_ty = find_ptr_base(arg1->ty);
         if (!func_ty || func_ty->kind != TY_FUNCTION)
             err("Non-function object called");
         expr->ty = func_ty->function.ret_ty;
         break;
     }
 
-    case EXPR_ADD:
-    case EXPR_SUB:
     case EXPR_MUL:
     case EXPR_DIV:
     case EXPR_MOD:
+        expr->ty = arg1->ty;
+        break;
+
+    case EXPR_ADD:
+    {
+        ty_t *ty;
+
+        if ((ty = find_ptr_base(arg1->ty))) {
+            if (!is_integer_ty(arg2->ty))
+                err("Pointer offset must be integer");
+            arg2 = make_binary(EXPR_MUL, arg2,
+                make_const_(make_ty(TY_INT), ty_size(ty)));
+            expr->ty = make_pointer(ty);
+        } else if ((ty = find_ptr_base(arg2->ty))) {
+            if (!is_integer_ty(arg1->ty))
+                err("Pointer offset must be integer");
+            arg1 = make_binary(EXPR_MUL, arg1,
+                make_const_(make_ty(TY_INT), ty_size(ty)));
+            expr->ty = make_pointer(ty);
+        } else {
+            if (!is_arith_ty(arg1->ty) || !is_arith_ty(arg2->ty))
+                err("Arihmetic type required");
+            expr->ty = arg1->ty;
+        }
+        break;
+    }
+
+    case EXPR_SUB:
+        expr->ty = arg1->ty;
+        break;
+
     case EXPR_LSH:
     case EXPR_RSH:
     case EXPR_AND:

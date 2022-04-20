@@ -83,7 +83,7 @@ void gen_addr(gen_t *self, expr_t *expr)
                 emit_code(self, "add rax, %d\n", expr->offset);
             break;
         case EXPR_DREF:
-            gen_value(self, expr);
+            gen_value(self, expr->arg1);
             break;
         default:
             err("Expected lvalue expression");
