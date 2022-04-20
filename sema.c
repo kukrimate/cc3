@@ -1,6 +1,6 @@
 #include "cc3.h"
 
-static int ty_align(ty_t *ty)
+int ty_align(ty_t *ty)
 {
     switch (ty->kind) {
     case TY_CHAR:       return 1;
@@ -34,7 +34,7 @@ static int ty_align(ty_t *ty)
     }
 }
 
-static int ty_size(ty_t *ty)
+int ty_size(ty_t *ty)
 {
     switch (ty->kind) {
     case TY_CHAR:       return 1;
@@ -539,19 +539,19 @@ static expr_t *make_expr(int kind)
     return expr;
 }
 
-expr_t *make_sym(sema_t *self, tk_t *tk)
+expr_t *make_sym(sema_t *self, const char *name)
 {
-    sym_t *sym = sema_lookup(self, tk_str(tk));
+    sym_t *sym = sema_lookup(self, name);
 
     // Find symbol
     if (!sym)
-        err("Undeclared identifier %s", tk_str(tk));
+        err("Undeclared identifier %s", name);
 
     // Create expression based on symbol type
     expr_t *expr;
     if (sym->offset == -1) {
         expr = make_expr(EXPR_GLOBAL);
-        expr->str = strdup(sym->name);
+        expr->str = strdup(name);
     } else {
         expr = make_expr(EXPR_LOCAL);
         expr->offset = sym->offset;
@@ -560,7 +560,7 @@ expr_t *make_sym(sema_t *self, tk_t *tk)
     return expr;
 }
 
-static expr_t *make_const_(ty_t *ty, val_t val)
+expr_t *make_const(ty_t *ty, val_t val)
 {
     expr_t *expr = make_expr(EXPR_CONST);
     expr->ty = ty;
@@ -568,37 +568,11 @@ static expr_t *make_const_(ty_t *ty, val_t val)
     return expr;
 }
 
-expr_t *make_const(tk_t *tk)
-{
-    const char *spelling = tk_str(tk);
-    val_t val = 0;
-
-    if (*spelling == '\'') {    // Character constant
-        ++spelling;
-        while (*spelling != '\'')
-            val = val << 8 | unescape(spelling, &spelling);
-    } else {                    // Integer constant
-        // Decode value
-        errno = 0;
-        char *end;
-        val = strtoull(spelling, &end, 0);
-        if (errno || *end)  // FIXME: decode suffix
-            err("Invalid integer constant %s", spelling);
-    }
-    return make_const_(make_ty(TY_INT), val);
-}
-
-expr_t *make_str_lit(tk_t *tk)
+expr_t *make_str_lit(const char *str)
 {
     expr_t *expr = make_expr(EXPR_STR_LIT);
-    string_t str;
-    string_init(&str);
-    const char *spelling = tk_str(tk);
-    ++spelling;
-    while (*spelling != '\"')
-        string_push(&str, unescape(spelling, &spelling));
-    expr->ty = make_array(make_ty(TY_CHAR), str.length + 1);
-    expr->str = str.data;
+    expr->ty = make_array(make_ty(TY_CHAR), strlen(str) + 1);
+    expr->str = strdup(str);
     return expr;
 }
 
@@ -740,6 +714,9 @@ expr_t *make_unary(int kind, expr_t *arg1)
         if (!is_scalar_ty((ty = arg1->ty)))
         ty = make_ty(TY_INT);
         break;
+    case EXPR_INIT:
+        ty = NULL;  // Initializers don't have a type
+        break;
     default:
         ASSERT_NOT_REACHED();
     }
@@ -796,13 +773,13 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
             if (!is_integer_ty(arg2->ty))
                 err("Pointer offset must be integer");
             arg2 = make_binary(EXPR_MUL, arg2,
-                make_const_(make_ty(TY_INT), ty_size(ty)));
+                make_const(make_ty(TY_INT), ty_size(ty)));
             expr->ty = make_pointer(ty);
         } else if ((ty = find_ptr_base(arg2->ty))) {
             if (!is_integer_ty(arg1->ty))
                 err("Pointer offset must be integer");
             arg1 = make_binary(EXPR_MUL, arg1,
-                make_const_(make_ty(TY_INT), ty_size(ty)));
+                make_const(make_ty(TY_INT), ty_size(ty)));
             expr->ty = make_pointer(ty);
         } else {
             if (!is_arith_ty(arg1->ty) || !is_arith_ty(arg2->ty))

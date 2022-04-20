@@ -13,4 +13,8 @@ int main(void)
     
     for (int i = 0; i < 5; ++i)
         printf("foo[%d] = %d\n", i, foo[i]);
+
+    int bar[5] = {0};
+    for (int i = 0; i < 5; ++i)
+        printf("bar[%d] = %d\n", i, bar[i]);
 }

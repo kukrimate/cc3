@@ -16,9 +16,6 @@
 /** Align (up) val to the nearest multiple of bound **/
 int align(int val, int bound);
 
-/** Decode a string with C escape sequences **/
-int unescape(const char *s, const char **end);
-
 /** Exit with an error message **/
 __attribute__((noreturn)) void err(const char *fmt, ...);
 
@@ -140,11 +137,17 @@ enum {
 };
 
 typedef struct tk tk_t;
+typedef unsigned long long val_t;
 
 struct tk {
     int type;
+    // Location in the source file
     size_t line, col;
+    // Spelling in the source file
     string_t spelling;
+    // Semantic value (based on type)
+    val_t val;      // TK_CONSTANT
+    string_t str;   // TK_STR_LIT
 };
 
 static inline const char *tk_str(tk_t *tk)
@@ -251,6 +254,9 @@ struct ty {
         } function;
     };
 };
+
+int ty_align(ty_t *ty);
+int ty_size(ty_t *ty);
 
 ty_t *make_ty(int kind);
 ty_t *make_struct(int kind, memb_t *members);
@@ -383,7 +389,6 @@ enum {
 };
 
 typedef struct expr expr_t;
-typedef unsigned long long val_t;
 
 struct expr {
     expr_t *next;
@@ -402,9 +407,9 @@ struct expr {
     expr_t *arg1, *arg2, *arg3;
 };
 
-expr_t *make_sym(sema_t *self, tk_t *tk);
-expr_t *make_const(tk_t *tk);
-expr_t *make_str_lit(tk_t *tk);
+expr_t *make_sym(sema_t *self, const char *name);
+expr_t *make_const(ty_t *ty, val_t val);
+expr_t *make_str_lit(const char *str);
 
 expr_t *make_unary(int kind, expr_t *arg1);
 expr_t *make_memb_expr(expr_t *arg1, const char *name);
@@ -439,7 +444,11 @@ struct stmt {
 
     const char *label;          // Goto label
     int case_val;               // Case label
-    int offset;                 // Local variable to initialize
+
+    struct {                    // Initializer
+        ty_t *ty;
+        int offset;
+    } init;
     
     expr_t *arg1, *arg2, *arg3; // Expression arguments
     stmt_t *body1, *body2;      // Statement list arguments

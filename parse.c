@@ -66,13 +66,13 @@ expr_t *primary_expression(cc3_t *self)
 
     switch (tk->type) {
     case TK_IDENTIFIER:
-        expr = make_sym(&self->sema, tk);
+        expr = make_sym(&self->sema, tk_str(tk));
         break;
     case TK_CONSTANT:
-        expr = make_const(tk);
+        expr = make_const(make_ty(TY_INT), tk->val);
         break;
     case TK_STR_LIT:
-        expr = make_str_lit(tk);
+        expr = make_str_lit(tk->str.data);
         break;
     case TK_LPAREN:
         expr = expression(self);
@@ -133,13 +133,14 @@ expr_t *postfix_expression(cc3_t *self)
 
 expr_t *unary_expression(cc3_t *self)
 {
-    static expr_t one = { .kind = EXPR_CONST, .val = 1 };
     if (maybe_want(self, TK_INCR)) {
         expr_t *arg = unary_expression(self);
-        return make_binary(EXPR_AS, arg, make_binary(EXPR_ADD, arg, &one));
+        return make_binary(EXPR_AS, arg,
+            make_binary(EXPR_ADD, arg, make_const(make_ty(TY_INT), 1)));
     } else if (maybe_want(self, TK_DECR)) {
         expr_t *arg = unary_expression(self);
-        return make_binary(EXPR_AS, arg, make_binary(EXPR_SUB, arg, &one));
+        return make_binary(EXPR_AS, arg,
+            make_binary(EXPR_SUB, arg, make_const(make_ty(TY_INT), 1)));
     } else if (maybe_want(self, TK_AND)) {
         return make_unary(EXPR_REF, cast_expression(self));
     } else if (maybe_want(self, TK_MUL)) {
@@ -330,8 +331,10 @@ expr_t *expression(cc3_t *self)
 
 int constant_expression(cc3_t *self)
 {
-    conditional_expression(self);
-    ASSERT_NOT_REACHED();
+    expr_t *expr = conditional_expression(self);
+    if (expr->kind != EXPR_CONST)
+        err("Expected constant expression");
+    return expr->val;
 }
 
 /** Declarations **/
@@ -339,8 +342,6 @@ int constant_expression(cc3_t *self)
 static ty_t *declaration_specifiers(cc3_t *self, int *out_sc);
 static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_name);
 static void type_qualifier_list(cc3_t *self);
-static expr_t *initializer(cc3_t *self);
-static expr_t *initializer_list(cc3_t *self);
 
 static ty_t *struct_declaration_list(cc3_t *self, int kind)
 {
@@ -842,18 +843,20 @@ end:
 }
 #endif
 
-expr_t *initializer(cc3_t *self)
+static expr_t *initializer_list(cc3_t *self);
+
+static expr_t *initializer(cc3_t *self)
 {
     // FIXME: implement these
     // designation(self);
 
     if (maybe_want(self, TK_LCURLY))
-        return make_unary(EXPR_INIT, initializer_list(self));
+        return initializer_list(self);
     else
         return assignment_expression(self);
 }
 
-expr_t *initializer_list(cc3_t *self)
+static expr_t *initializer_list(cc3_t *self)
 {
     expr_t *head = NULL, **tail = &head;
     for (;;) {
@@ -863,12 +866,13 @@ expr_t *initializer_list(cc3_t *self)
         // Check for the end of the list
         if (maybe_want(self, TK_COMMA)) {
             if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
-                return head;
+                break;
         } else {
             want(self, TK_RCURLY);              // Otherwise the list must end
-            return head;
+            break;
         }
     }
+    return make_unary(EXPR_INIT, head);
 }
 
 /** Statements **/
@@ -903,7 +907,8 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
                 // Add local initialization "statement" if the target is local
                 if (sym->offset != -1) {
                     stmt_t *stmt = make_stmt(STMT_INIT);
-                    stmt->offset = sym->offset;
+                    stmt->init.ty = clone_ty(sym->ty);
+                    stmt->init.offset = sym->offset;
                     stmt->arg1 = expr;
                     append_stmt(tail, stmt);
                 } else {

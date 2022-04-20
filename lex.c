@@ -11,14 +11,18 @@ void lex_init(lexer_t *self, FILE *fp)
     self->tk_pos = 0;
     self->tk_cnt = 0;
 
-    for (int i = 0; i < LEX_TK_CNT; ++i)
+    for (int i = 0; i < LEX_TK_CNT; ++i) {
         string_init(&self->tk_buf[i].spelling);
+        string_init(&self->tk_buf[i].str);
+    }
 }
 
 void lex_free(lexer_t *self)
 {
-    for (int i = 0; i < LEX_TK_CNT; ++i)
+    for (int i = 0; i < LEX_TK_CNT; ++i) {
         string_free(&self->tk_buf[i].spelling);
+        string_init(&self->tk_buf[i].str);
+    }
 }
 
 static int lex_peek(lexer_t *self, int i)
@@ -83,7 +87,7 @@ static bool lex_match(lexer_t *self, int want)
     return false;
 }
 
-static int lex_ident(lexer_t *self)
+static int lex_check_keyword(lexer_t *self)
 {
     const char *spelling = self->tk->spelling.data;
 
@@ -128,6 +132,55 @@ static int lex_ident(lexer_t *self)
     return TK_IDENTIFIER;
 }
 
+static int lex_unescape(lexer_t *self)
+{
+    int val = lex_input(self);
+
+    switch (val) {
+    // Single char
+    case '\'':
+    case '"':
+    case '?':
+    case '\\':  return val;
+    case 'a':   return '\a';
+    case 'b':   return '\b';
+    case 'f':   return '\f';
+    case 'n':   return '\n';
+    case 'r':   return '\r';
+    case 't':   return '\t';
+    case 'v':   return '\v';
+    // Octal
+    case '0' ... '7':
+        val -= '0';
+        for (int ch;; lex_adv(self))
+            switch ((ch = lex_peek(self, 0))) {
+            case '0' ... '7':
+                val = val << 3 | (ch - '0');
+                break;
+            default:
+                return val;
+            }
+    // Hex
+    case 'x':
+        for (int ch;; lex_adv(self))
+            switch ((ch = lex_peek(self, 0))) {
+            case '0' ... '9':
+                val = val << 4 | (ch - '0');
+                break;
+            case 'a' ... 'f':
+                val = val << 4 | (ch - 'a' + 0xa);
+                break;
+            case 'A' ... 'F':
+                val = val << 4 | (ch - 'A' + 0xa);
+                break;
+            default:
+                return val;
+            }
+    default:
+        err("Invalid escape sequence %c", val);
+    }
+}
+
 static int lex_next(lexer_t *self)
 {
     int ch;
@@ -140,7 +193,7 @@ retry:
     self->tk->line = self->line;
     self->tk->col = self->col;
 
-    switch (lex_input(self)) {
+    switch ((ch = lex_input(self))) {
     // End of file
     case EOF:
         return TK_EOF;
@@ -156,71 +209,91 @@ retry:
     case '_':
     case 'a' ... 'z':
     case 'A' ... 'Z':
+        string_clear(&self->tk->str);
+        string_push(&self->tk->str, ch);
         for (;; lex_eat(self))
-            switch (lex_peek(self, 0)) {
+            switch ((ch = lex_peek(self, 0))) {
             case '_':
             case 'a' ... 'z':
             case 'A' ... 'Z':
             case '0' ... '9':
+                string_push(&self->tk->str, ch);
                 break;
             default:
-                return lex_ident(self);
+                return lex_check_keyword(self);
             }
     // Constant
     case '0':
         // Hex
-        if ((ch = lex_peek(self, 0)) == 'x' || ch == 'X') {
-            lex_eat(self);
+        if (lex_match(self, 'x') || lex_match(self, 'X')) {
+            self->tk->val = 0;
             for (;; lex_eat(self))
-                switch (lex_peek(self, 0)) {
+                switch ((ch = lex_peek(self, 0))) {
                 case '0' ... '9':
+                    self->tk->val = (self->tk->val << 4) | (ch - '0');
+                    break;
                 case 'a' ... 'f':
+                    self->tk->val = (self->tk->val << 4) | (ch - 'a' + 0xa);
+                    break;
                 case 'A' ... 'F':
+                    self->tk->val = (self->tk->val << 4) | (ch - 'A' + 0xa);
                     break;
                 default:
                     return TK_CONSTANT;
                 }
         }
         // Octal
+        self->tk->val = 0;
         for (;; lex_eat(self))
             switch (lex_peek(self, 0)) {
             case '0' ... '7':
+                self->tk->val = (self->tk->val << 3) | (ch - '0');
                 break;
             default:
                 return TK_CONSTANT;
             }
     case '1' ... '9':
         // Decimal
+        self->tk->val = ch - '0';
         for (;; lex_eat(self))
             switch (lex_peek(self, 0)) {
             case '0' ... '9':
+                self->tk->val = self->tk->val * 10 + ch - '0';
                 break;
             default:
                 return TK_CONSTANT;
             }
     // Character constant
     case '\'':
+        self->tk->val = 0;
         for (;;)
-            switch (lex_input(self)) {
+            switch ((ch = lex_input(self))) {
             case EOF:
             case '\n':
                 return TK_ERROR;
             case '\'':
                 return TK_CONSTANT;
             case '\\':
-                lex_input(self);
+                ch = lex_unescape(self);
+                // FALLTHROUGH
+            default:
+                self->tk->val = (self->tk->val << 8) | ch;
             }
     // String literal
     case '\"':
+        string_clear(&self->tk->str);
         for (;;)
-            switch (lex_input(self)) {
+            switch ((ch = lex_input(self))) {
             case EOF:
             case '\n':
                 return TK_ERROR;
             case '\"':
                 return TK_STR_LIT;
             case '\\':
-                lex_input(self);
+                ch = lex_unescape(self);
+                // FALLTHROUGH
+            default:
+                string_push(&self->tk->str, ch);
             }
     case '[':
         return TK_LSQ;

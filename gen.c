@@ -380,6 +380,110 @@ void gen_bool(gen_t *self, expr_t *expr, bool val, int label)
     }
 }
 
+static void gen_initializer(gen_t *self, ty_t *ty, int offset, expr_t *expr)
+{
+    // Decompose aggregate initializer
+    switch (ty->kind) {
+    case TY_STRUCT:
+        {
+            if (expr) {
+                if (expr->kind != EXPR_INIT)
+                    err("Expected initializer list");
+                expr = expr->arg1;
+            }
+
+            // Struct initializers can initialize all entries
+            for (memb_t *memb = ty->stru.members; memb; memb = memb->next) {
+                gen_initializer(self, memb->ty, offset + memb->offset, expr);
+                if (expr)
+                    expr = expr->next;
+            }
+
+            // Make sure the initializer list has no more elements
+            if (expr)
+                err("Trailing garbage in initializer list");
+
+            return;
+        }
+    case TY_UNION:
+        {
+            if (expr) {
+                if (expr->kind != EXPR_INIT)
+                    err("Expected initializer list");
+                expr = expr->arg1;
+            }
+
+            // Union initializers can only initializer the first member
+            memb_t *memb = ty->stru.members;
+            gen_initializer(self, memb->ty, offset + memb->offset, expr->arg1);
+
+            // Make sure the initializer list has no more elements
+            if (expr->arg1->next)
+                err("Trailing garbage in initializer list");
+
+            return;
+        }
+    case TY_ARRAY:
+        {
+            if (expr) {
+                if (expr->kind != EXPR_INIT)
+                    err("Expected initializer list");
+                expr = expr->arg1;
+            }
+
+            // Save array element type and its size
+            ty_t *elem_ty = ty->array.elem_ty;
+            int elem_size = ty_size(elem_ty);
+
+            // Each array element can have an initializer
+            for (int i = 0; i < ty->array.cnt; ++i) {
+                gen_initializer(self, elem_ty, offset, expr);
+                if (expr)
+                    expr = expr->next;
+                offset += elem_size;
+            }
+
+            // Make sure the initializer list has no more elements
+            if (expr)
+                err("Trailing garbage in initializer list");
+            
+            return;
+        }
+    }
+
+    // Either store the value (or zero)
+    if (expr)
+        gen_value(self, expr);
+    else
+        emit_code(self, "xor rax, rax\n");
+
+    switch (ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_BOOL:
+        emit_code(self, "mov byte [rbp - %d], al\n", self->offset - offset);
+        break;
+    case TY_SHORT:
+    case TY_USHORT:
+        emit_code(self, "mov word [rbp - %d], ax\n", self->offset - offset);
+        break;
+    case TY_INT:
+    case TY_UINT:
+        emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
+        break;
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_POINTER:
+        emit_code(self, "mov qword [rbp - %d], rax\n", self->offset - offset);
+        break;
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
 static void gen_stmts(gen_t *self, stmt_t *head)
 {
     for (; head; head = head->next)
@@ -476,45 +580,7 @@ static void gen_stmts(gen_t *self, stmt_t *head)
                 gen_value(self, head->arg1);
             break;
         case STMT_INIT:
-            // Generate value
-            // FIXME: initializer lists need more hackery
-            gen_value(self, head->arg1);
-            // Generate store
-            switch (head->arg1->ty->kind) {
-            case TY_CHAR:
-            case TY_SCHAR:
-            case TY_UCHAR:
-            case TY_BOOL:
-                emit_code(self, "mov byte [rbp - %d], al\n",
-                    self->offset - head->offset);
-                break;
-            case TY_SHORT:
-            case TY_USHORT:
-                emit_code(self, "mov word [rbp - %d], ax\n",
-                    self->offset - head->offset);
-                break;
-            case TY_INT:
-            case TY_UINT:
-                emit_code(self, "mov dword [rbp - %d], eax\n",
-                    self->offset - head->offset);
-                break;
-            case TY_LONG:
-            case TY_ULONG:
-            case TY_LLONG:
-            case TY_ULLONG:
-            case TY_POINTER:
-                emit_code(self, "mov qword [rbp - %d], rax\n",
-                    self->offset - head->offset);
-                break;
-            // FIXME: float loads
-            case TY_FLOAT:
-            case TY_DOUBLE:
-            case TY_LDOUBLE:
-                ASSERT_NOT_REACHED();
-            // Other types are left as addresses
-            default:
-                break;
-            }
+            gen_initializer(self, head->init.ty, head->init.offset, head->arg1);
             break;
         case STMT_EVAL:
             gen_value(self, head->arg1);
