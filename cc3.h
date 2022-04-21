@@ -249,6 +249,8 @@ enum {
     TY_FUNCTION,
 };
 
+typedef struct scope scope_t;
+
 struct ty {
     ty_t *next;
 
@@ -270,6 +272,8 @@ struct ty {
             ty_t *ret_ty;
             ty_t *param_tys;
             bool var;
+
+            scope_t *scope;     // Function prototypes have their own scope
         } function;
     };
 };
@@ -296,6 +300,7 @@ enum {
     SYM_EXTERN,
     SYM_STATIC,
     SYM_LOCAL,
+    SYM_ENUM_CONST,
 };
 
 typedef struct sym sym_t;
@@ -311,9 +316,8 @@ struct sym {
     bool had_def;
 
     int offset;
+    val_t val;
 };
-
-typedef struct scope scope_t;
 
 struct scope {
     scope_t *parent;
@@ -332,11 +336,16 @@ struct sema {
 
 void sema_init(sema_t *self);
 void sema_free(sema_t *self);
+
 void sema_enter(sema_t *self);
 void sema_exit(sema_t *self);
+void sema_push(sema_t *self, scope_t *scope);
+scope_t *sema_pop(sema_t *self);
 
 // Declare a name
 sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name);
+// Declare an enumeration constant
+sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val);
 // Lookup a declaration in any scope
 sym_t *sema_lookup(sema_t *self, const char *name);
 // Lookup a name in any scope, if it is a typedef, return its type

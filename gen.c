@@ -347,7 +347,7 @@ void gen_bool(gen_t *self, expr_t *expr, bool val, int label)
         emit_jump(self, jcc(expr->kind, val), label);
         break;
     case EXPR_LNOT:
-        gen_bool(self, expr, !val, label);
+        gen_bool(self, expr->arg1, !val, label);
         break;
     case EXPR_LAND:
         if (val) {
@@ -448,10 +448,10 @@ static void gen_initializer(gen_t *self, ty_t *ty, int offset, expr_t *expr)
 
             // Union initializers can only initializer the first member
             memb_t *memb = ty->tag->members;
-            gen_initializer(self, memb->ty, offset + memb->offset, expr->arg1);
+            gen_initializer(self, memb->ty, offset + memb->offset, expr);
 
             // Make sure the initializer list has no more elements
-            if (expr->arg1->next)
+            if (expr->next)
                 err("Trailing garbage in initializer list");
 
             break;

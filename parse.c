@@ -131,6 +131,9 @@ expr_t *postfix_expression(cc3_t *self)
     }
 }
 
+static bool is_declaration_specifier(cc3_t *self, tk_t *tk);
+static ty_t *type_name(cc3_t *self);
+
 expr_t *unary_expression(cc3_t *self)
 {
     if (maybe_want(self, TK_INCR)) {
@@ -153,17 +156,36 @@ expr_t *unary_expression(cc3_t *self)
         return make_unary(EXPR_NOT, cast_expression(self));
     } else if (maybe_want(self, TK_LNOT)) {
         return make_unary(EXPR_LNOT, cast_expression(self));
+    } else if (maybe_want(self, TK_SIZEOF)) {
+        ty_t *ty;
+        if (peek(self, 0)->type == TK_LPAREN
+                && is_declaration_specifier(self, peek(self, 1))) {
+            // sizeof '(' type-name ')'
+            adv(self);
+            ty = type_name(self);
+            want(self, TK_RPAREN);
+        } else {
+            // sizeof unary-expression
+            ty = unary_expression(self)->ty;
+        }
+        return make_const(make_ty(TY_ULONG), ty_size(ty));
     } else {
         return postfix_expression(self);
     }
-    // FIXME: sizeof unary-expression
-    //    and sizeof '(' type-name ')' here
 }
 
 expr_t *cast_expression(cc3_t *self)
 {
-    return unary_expression(self);
-    // FIXME: recognize '(' type-name ')' here
+    if (peek(self, 0)->type == TK_LPAREN
+                && is_declaration_specifier(self, peek(self, 1))) {
+        // '(' type-name ')' cast-expression
+        adv(self);
+        type_name(self);
+        want(self, TK_RPAREN);
+        return cast_expression(self); // FIXME: represent cast in the AST
+    } else {
+        return unary_expression(self);
+    }
 }
 
 expr_t *multiplicative_expression(cc3_t *self)
@@ -337,11 +359,66 @@ int constant_expression(cc3_t *self)
     return expr->val;
 }
 
+/** Initializers **/
+
+#if 0
+static void designation(cc3_t *self)
+{
+    bool match = false;
+
+    for (;;)
+        if (maybe_want(self, TK_LSQ)) {
+            constant_expression(self);
+            want(self, TK_RSQ);
+            match = true;
+        } else if (maybe_want(self, TK_DOT)) {
+            want(self, TK_IDENTIFIER);
+            match = true;
+        } else {
+            goto end;
+        }
+end:
+    if (match)
+        want(self, TK_AS);
+}
+#endif
+
+static expr_t *initializer_list(cc3_t *self);
+
+static expr_t *initializer(cc3_t *self)
+{
+    // FIXME: implement these
+    // designation(self);
+
+    if (maybe_want(self, TK_LCURLY))
+        return initializer_list(self);
+    else
+        return assignment_expression(self);
+}
+
+static expr_t *initializer_list(cc3_t *self)
+{
+    expr_t *head = NULL, **tail = &head;
+    for (;;) {
+        // Append initializer to the list
+        *tail = initializer(self);
+        tail = &(*tail)->next;
+        // Check for the end of the list
+        if (maybe_want(self, TK_COMMA)) {
+            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
+                break;
+        } else {
+            want(self, TK_RCURLY);              // Otherwise the list must end
+            break;
+        }
+    }
+    return make_unary(EXPR_INIT, head);
+}
+
 /** Declarations **/
 
 static ty_t *declaration_specifiers(cc3_t *self, int *out_sc);
 static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_name);
-static void type_qualifier_list(cc3_t *self);
 
 static memb_t *member_list(cc3_t *self)
 {
@@ -355,28 +432,42 @@ static memb_t *member_list(cc3_t *self)
         if (sc != -1)
             err("Storge class not allowed in struct/union");
 
-        do {
-            /* FIXME: anonymous bitfield
-            if (maybe_want(self, TK_COLON)) {
-                constant_expression(self);
-                continue;
-            }
-            */
+        if (!maybe_want(self, TK_SEMICOLON)) {
 
-            char *name;
-            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
-            *tail = make_memb(ty, name);
+            do {
+                /* FIXME: anonymous bitfield
+                if (maybe_want(self, TK_COLON)) {
+                    constant_expression(self);
+                    continue;
+                }
+                */
 
-            /* FIXME: bitfield
-            if (maybe_want(self, TK_COLON))
-                constant_expression(self);
-            */
+                char *name;
+                ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
+                *tail = make_memb(ty, name);
 
-            tail = &(*tail)->next;              // Advance member list
+                /* FIXME: bitfield
+                if (maybe_want(self, TK_COLON))
+                    constant_expression(self);
+                */
 
-        } while (maybe_want(self, TK_COMMA));   // Another declarator after ,
+                tail = &(*tail)->next;              // Advance member list
 
-        want(self, TK_SEMICOLON);               // Must end with ;
+            } while (maybe_want(self, TK_COMMA));   // Another declarator after ,
+
+            want(self, TK_SEMICOLON);               // Must end with ;
+        } else {
+            // [GNU] An anonymous struct/union is allowed as a member
+            if (base_ty->kind != TY_TAG
+                    || (base_ty->tag->kind != TAG_STRUCT
+                        && base_ty->tag->kind != TAG_UNION)
+                    || !base_ty->tag->defined)
+                err("Invalid anonymous member");
+
+            *tail = make_memb(clone_ty(base_ty), NULL);
+            tail = &(*tail)->next;
+        }
+
         free_ty(base_ty);                       // Cloned for each declaration
 
     } while (!maybe_want(self, TK_RCURLY));
@@ -434,13 +525,18 @@ static tag_t *union_specifier(cc3_t *self)
 
 static void enumerator_list(cc3_t *self)
 {
-    for (;;) {
+    val_t cur = 0;
+
+    for (;; ++cur) {
         // Read enumerator name
-        want(self, TK_IDENTIFIER);
+        char *name = strdup(tk_str(want(self, TK_IDENTIFIER)));
 
         // Optionally there might be a value
         if (maybe_want(self, TK_AS))
-            constant_expression(self);
+            cur = constant_expression(self);
+
+        // Declare enumeration constant
+        sema_declare_enum_const(&self->sema, name, cur);
 
         if (maybe_want(self, TK_COMMA)) {
             if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
@@ -708,6 +804,66 @@ set_match:
     }
 }
 
+static bool is_declaration_specifier(cc3_t *self, tk_t *tk)
+{
+    switch (tk->type) {
+
+    // Storage class
+    case TK_TYPEDEF:
+    case TK_EXTERN:
+    case TK_STATIC:
+    case TK_AUTO:
+    case TK_REGISTER:
+
+    // Type qualifier
+    case TK_CONST:
+    case TK_RESTRICT:
+    case TK_VOLATILE:
+
+    // Function specifier
+    case TK_INLINE:
+
+    // Type specifier
+    case TK_VOID:
+    case TK_CHAR:
+    case TK_SHORT:
+    case TK_INT:
+    case TK_LONG:
+    case TK_FLOAT:
+    case TK_DOUBLE:
+    case TK_SIGNED:
+    case TK_UNSIGNED:
+    case TK_BOOL:
+    case TK_COMPLEX:
+    case TK_IMAGINARY:
+    case TK_STRUCT:
+    case TK_UNION:
+    case TK_ENUM:
+        return true;
+
+    // Might be a typedef name
+    case TK_IDENTIFIER:
+        return sema_findtypedef(&self->sema, tk_str(tk)) != NULL;
+
+    default:
+        return false;
+    }
+}
+
+static void type_qualifier_list(cc3_t *self)
+{
+    for (;;)
+        switch (peek(self, 0)->type) {
+        case TK_CONST:
+        case TK_RESTRICT:
+        case TK_VOLATILE:
+            adv(self);
+            break;
+        default:
+            return;
+        }
+}
+
 static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
 {
     for (;;) {
@@ -734,7 +890,9 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
 
         /** Function declarator **/
         if (maybe_want(self, TK_LPAREN)) {
-            // K&R identifier list (including an empty one)
+
+#if 0
+            // FIXME: K&R identifier list (including an empty one)
             if (maybe_want(self, TK_RPAREN)) {
                 // NOTE: K&R functions are marked varargs with no parameters
                 ty = make_function(ty, NULL, true);
@@ -749,50 +907,49 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
                 ty = make_function(ty, NULL, true);
                 continue;
             }
-
-            // "void" as the only unnamed parameter means no parameters
-            if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
-                adv(self);
-                adv(self);
-
-                ty = make_function(ty, NULL, false);
-                continue;
-            }
-
-            // Or otherwise a prototype must follow
+#endif
+            // Prototypes have their own scope
             sema_enter(&self->sema);
 
+            // Then we can start reading the parameters
             ty_t *param_tys = NULL, **tail = &param_tys;
             bool var = false;
 
-            for (;;) {
-                int sc;
-                if (!(*tail = declaration_specifiers(self, &sc)))
-                    break;
+            if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
+                // "void" as the only unnamed parameter means no parameters
+                adv(self);
+                adv(self);
+            } else {
+                // Otherwise a regular parameter type list must follow
+                for (;;) {
+                    int sc;
+                    if (!(*tail = declaration_specifiers(self, &sc)))
+                        break;
 
-                char *name;
-                *tail = make_param(declarator(self, *tail, true, &name));
+                    char *name;
+                    *tail = make_param(declarator(self, *tail, true, &name));
 
-                if (name)
-                    sema_declare(&self->sema, sc, clone_ty(*tail), name);
+                    if (name)
+                        sema_declare(&self->sema, sc, clone_ty(*tail), name);
 
-                // If there is no comma the end was reached
-                if (!maybe_want(self, TK_COMMA))
-                    break;
+                    // If there is no comma the end was reached
+                    if (!maybe_want(self, TK_COMMA))
+                        break;
 
-                // Otherwise we check for ...
-                if (maybe_want(self, TK_ELLIPSIS)) {
-                    var = true;
-                    break;
+                    // Otherwise we check for ...
+                    if (maybe_want(self, TK_ELLIPSIS)) {
+                        var = true;
+                        break;
+                    }
+
+                    tail = &(*tail)->next;
                 }
 
-                tail = &(*tail)->next;
+                want(self, TK_RPAREN);
             }
 
-            want(self, TK_RPAREN);
-            sema_exit(&self->sema);
-
             ty = make_function(ty, param_tys, var);
+            ty->function.scope = sema_pop(&self->sema);
             continue;
         }
 
@@ -843,72 +1000,22 @@ ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract,
     return declarator_suffixes(self, ty);
 }
 
-void type_qualifier_list(cc3_t *self)
+static ty_t *type_name(cc3_t *self)
 {
-    for (;;)
-        switch (peek(self, 0)->type) {
-        case TK_CONST:
-        case TK_RESTRICT:
-        case TK_VOLATILE:
-            adv(self);
-            break;
-        default:
-            return;
-        }
-}
+    int sc;
+    ty_t *ty = declaration_specifiers(self, &sc);
 
-#if 0
-static void designation(cc3_t *self)
-{
-    bool match = false;
+    if (!ty)
+        err("Expected type name");
+    if (sc != -1)
+        err("No storage class allowed");
 
-    for (;;)
-        if (maybe_want(self, TK_LSQ)) {
-            constant_expression(self);
-            want(self, TK_RSQ);
-            match = true;
-        } else if (maybe_want(self, TK_DOT)) {
-            want(self, TK_IDENTIFIER);
-            match = true;
-        } else {
-            goto end;
-        }
-end:
-    if (match)
-        want(self, TK_AS);
-}
-#endif
+    char *name;
+    ty = declarator(self, ty, true, &name);
+    if (name)
+        err("Only abstract declarators are allowed");
 
-static expr_t *initializer_list(cc3_t *self);
-
-static expr_t *initializer(cc3_t *self)
-{
-    // FIXME: implement these
-    // designation(self);
-
-    if (maybe_want(self, TK_LCURLY))
-        return initializer_list(self);
-    else
-        return assignment_expression(self);
-}
-
-static expr_t *initializer_list(cc3_t *self)
-{
-    expr_t *head = NULL, **tail = &head;
-    for (;;) {
-        // Append initializer to the list
-        *tail = initializer(self);
-        tail = &(*tail)->next;
-        // Check for the end of the list
-        if (maybe_want(self, TK_COMMA)) {
-            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
-                break;
-        } else {
-            want(self, TK_RCURLY);              // Otherwise the list must end
-            break;
-        }
-    }
-    return make_unary(EXPR_INIT, head);
+    return ty;
 }
 
 /** Statements **/
@@ -966,11 +1073,9 @@ static void statement(cc3_t *self, stmt_t ***tail);
 
 static inline void block_item_list(cc3_t *self, stmt_t ***tail)
 {
-    sema_enter(&self->sema);
     while (!maybe_want(self, TK_RCURLY))
         if (!block_scope_declaration(self, tail))
             statement(self, tail);
-    sema_exit(&self->sema);
 }
 
 static inline stmt_t *read_stmt(cc3_t *self)
@@ -985,26 +1090,32 @@ void statement(cc3_t *self, stmt_t ***tail)
     tk_t *tk;
 
     // Statements may be preceeded by labels
-    if ((tk = peek(self, 0))->type == TK_IDENTIFIER
-            && peek(self, 1)->type == TK_COLON) {
-        stmt_t *stmt = make_stmt(STMT_LABEL);
-        stmt->label = strdup(tk_str(tk));
-        adv(self);
-        adv(self);
-        append_stmt(tail, stmt);
-    } else if (maybe_want(self, TK_CASE)) {
-        stmt_t *stmt = make_stmt(STMT_LABEL);
-        stmt->case_val = constant_expression(self);
-        want(self, TK_COLON);
-        append_stmt(tail, stmt);
-    } else if (maybe_want(self, TK_DEFAULT)) {
-        want(self, TK_COLON);
-        append_stmt(tail, make_stmt(STMT_DEFAULT));
+    for (;;) {
+        if ((tk = peek(self, 0))->type == TK_IDENTIFIER
+                && peek(self, 1)->type == TK_COLON) {
+            stmt_t *stmt = make_stmt(STMT_LABEL);
+            stmt->label = strdup(tk_str(tk));
+            adv(self);
+            adv(self);
+            append_stmt(tail, stmt);
+        } else if (maybe_want(self, TK_CASE)) {
+            stmt_t *stmt = make_stmt(STMT_CASE);
+            stmt->case_val = constant_expression(self);
+            want(self, TK_COLON);
+            append_stmt(tail, stmt);
+        } else if (maybe_want(self, TK_DEFAULT)) {
+            want(self, TK_COLON);
+            append_stmt(tail, make_stmt(STMT_DEFAULT));
+        } else {
+            break;
+        }
     }
 
     // Compound statement
     if (maybe_want(self, TK_LCURLY)) {
+        sema_enter(&self->sema);
         block_item_list(self, tail);
+        sema_exit(&self->sema);
         return;
     }
 
@@ -1176,15 +1287,28 @@ void parse(cc3_t *self)
 
             // Check for function definition
             if (maybe_want(self, TK_LCURLY)) {
+                // Make sure it is really a function
+                if (ty->kind != TY_FUNCTION)
+                    err("Function body after non-function declaration");
+
                 // Mark the symbol as having a definition
                 sym->had_def = true;
+
                 // HACK!: zero sema's picture of the frame size before
                 // entering the context of a new function
                 self->sema.offset = 0;
+
+                // Re-enter its prototype's scope before parsing the body
+                sema_push(&self->sema, ty->function.scope);
+                // Parse the body
                 stmt_t *body = read_block(self);
+                // We are done with the function's scope here
+                sema_exit(&self->sema);
+
                 // Then we can generate the function, providing the correct
                 // frame size from the hack above
                 gen_func(&self->gen, sym, self->sema.offset, body);
+
                 free_ty(base_ty);
                 continue;
             }
@@ -1212,4 +1336,6 @@ void parse(cc3_t *self)
         // Free base type
         free_ty(base_ty);
     }
+
+    want(self, TK_EOF);
 }

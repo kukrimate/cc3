@@ -200,6 +200,7 @@ void free_ty(ty_t *ty)
     free(ty);
 }
 
+/* FIXME: make this work for recursive types
 static void print_ty_r(ty_t *ty);
 
 static void print_members(memb_t *members)
@@ -212,7 +213,7 @@ static void print_members(memb_t *members)
         printf("; ");
     }
     printf("}");
-}
+}*/
 
 static void print_ty_r(ty_t *ty)
 {
@@ -241,16 +242,16 @@ static void print_ty_r(ty_t *ty)
                 printf("struct %s", ty->tag->name);
             else
                 printf("struct");
-            if (ty->tag->defined)
-                print_members(ty->tag->members);
+            /*if (ty->tag->defined)
+                print_members(ty->tag->members);*/
             break;
         case TAG_UNION:
             if (ty->tag->name)
                 printf("union %s", ty->tag->name);
             else
                 printf("union");
-            if (ty->tag->defined)
-                print_members(ty->tag->members);
+            /*if (ty->tag->defined)
+                print_members(ty->tag->members);*/
             break;
         case TAG_ENUM:
             if (ty->tag->name)
@@ -427,69 +428,102 @@ void sema_exit(sema_t *self)
     // Free symbols
     for (sym_t *sym = scope->syms; sym; ) {
         sym_t *tmp = sym->next;
-        free_ty(sym->ty);
+        if (sym->kind != SYM_ENUM_CONST)
+            free_ty(sym->ty);
         free(sym->name);
         free(sym);
         sym = tmp;
     }
 
-    // Free tags
-    for (tag_t *tag = scope->tags; tag; ) {
-        tag_t *tmp = tag->next;
-        free(tag->name);
-        if (tag->members)
-            free_members(tag->members);
-        free(tag);
-        tag = tmp;
-    }
+    // FIXME: Free tags, use refcounting
+    // We cannot actually do this for now, because we will get use
+    // after frees in the code generator
+    // for (tag_t *tag = scope->tags; tag; ) {
+    //     tag_t *tmp = tag->next;
+    //     free(tag->name);
+    //     if (tag->members)
+    //         free_members(tag->members);
+    //     free(tag);
+    //     tag = tmp;
+    // }
 
     // Free scope
     free(scope);
 }
 
-sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
+void sema_push(sema_t *self, scope_t *scope)
 {
-    sym_t *sym;
+    scope->parent = self->scope;
+    self->scope = scope;
+}
 
-    // Find previous declaration in the current scope
-    for (sym = self->scope->syms; sym; sym = sym->next)
-        if (strcmp(sym->name, name) == 0)
-            break;
+scope_t *sema_pop(sema_t *self)
+{
+    scope_t *scope = self->scope;
+    self->scope = scope->parent;
+    return scope;
+}
 
-    if (sym) {
-        // FIXME: allow re-declarations in some cases
-        err("Re-declaration of symbol %s", name);
-    } else {
-        // Otherwise add new symbol to current scope
-        sym = calloc(1, sizeof *sym);
-        sym->next = self->scope->syms;
-        self->scope->syms = sym;
-    }
-
-    // Figure out symbol type from storage class
+static int sym_kind(sema_t *self, int sc)
+{
     switch (sc) {
     case TK_TYPEDEF:
-        sym->kind = SYM_TYPEDEF;
-        break;
+        return SYM_TYPEDEF;
     case TK_EXTERN:
-        sym->kind = SYM_EXTERN;
-        break;
+        return SYM_EXTERN;
     case TK_STATIC:
-        sym->kind = SYM_STATIC;
-        break;
+        return SYM_STATIC;
     case TK_AUTO:
     case TK_REGISTER:
-        sym->kind = SYM_LOCAL;
-        break;
+        return SYM_LOCAL;
     case -1:
         if (self->scope->parent)
-            sym->kind = SYM_LOCAL;
+            return SYM_LOCAL;
         else
-            sym->kind = SYM_EXTERN;
-        break;
+            return SYM_EXTERN;
     default:
         ASSERT_NOT_REACHED();
     }
+}
+
+sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
+{
+    // Look for previous declaration in the current scope
+    sym_t *sym;
+    for (sym = self->scope->syms; sym; sym = sym->next)
+        if (!strcmp(sym->name, name))
+            break;
+
+    if (sym) {
+        int new_kind = sym_kind(self, sc);
+
+        switch (sym->kind) {
+        case SYM_EXTERN:
+        case SYM_STATIC:
+            if (new_kind == SYM_EXTERN) { // OK
+                break;
+            }
+            if (new_kind == SYM_STATIC) { // OK
+                sym->kind = SYM_STATIC;
+                break;
+            }
+            // FALLTHROUGH
+        default:
+            err("Invalid re-declaration of %s", name);
+        }
+
+        // FIXME: check re-declaration type
+        printf("Re-declaration of %s\n", name); // Debug
+        return sym;
+    }
+
+    // Add new symbol to current scope
+    sym = calloc(1, sizeof *sym);
+    if (!sym) abort();
+    sym->next = self->scope->syms;
+    self->scope->syms = sym;
+
+    sym->kind = sym_kind(self, sc);
 
     // Variables cannot be declared as void
     if (sym->kind != SYM_TYPEDEF && ty->kind == TY_VOID)
@@ -498,11 +532,11 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     sym->ty = ty;
     sym->name = name;
 
-    // Debug
-    printf("Declare %s as ", name);
+    printf("Declare %s as ", name);     // Debug
     print_ty(ty);
 
-    if (self->scope->parent) {
+    // Allocate local variable if required
+    if (sym->kind == SYM_LOCAL) {
         // First align the stack
         self->offset = align(self->offset, ty_align(ty));
         // Then we can allocate space for the variable
@@ -512,6 +546,24 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
         sym->offset = -1;
     }
 
+    return sym;
+}
+
+sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val)
+{
+    // Look for previous declaration in the current scope
+    for (sym_t *sym = self->scope->syms; sym; sym = sym->next)
+        if (!strcmp(sym->name, name))
+            err("Invalid re-declaration of %s", name);
+
+    // If not found we are good to declare it
+    sym_t *sym = calloc(1, sizeof *sym);
+    if (!sym) abort();
+    sym->next = self->scope->syms;
+    self->scope->syms = sym;
+    sym->kind = SYM_ENUM_CONST;
+    sym->name = name;
+    sym->val = val;
     return sym;
 }
 
@@ -547,11 +599,13 @@ static tag_t *create_tag(sema_t *self, int kind, const char *name)
 tag_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
 {
     // Look for tags in any scope
-    tag_t *tag;
-    for (scope_t *scope = self->scope; scope; scope = scope->parent)
-        for (tag = scope->tags; tag; tag = tag->next)
-            if (tag->name && !strcmp(tag->name, name))
-                goto found;
+    tag_t *tag = NULL;
+
+    if (name)
+        for (scope_t *scope = self->scope; scope; scope = scope->parent)
+            for (tag = scope->tags; tag; tag = tag->next)
+                if (tag->name && !strcmp(tag->name, name))
+                    goto found;
 found:
 
     if (tag) {
@@ -569,10 +623,12 @@ found:
 tag_t *sema_define_tag(sema_t *self, int kind, const char *name)
 {
     // Look for tags just in the current scope
-    tag_t *tag;
-    for (tag = self->scope->tags; tag; tag = tag->next)
-        if (tag->name && !strcmp(tag->name, name))
-            break;
+    tag_t *tag = NULL;
+
+    if (name)
+        for (tag = self->scope->tags; tag; tag = tag->next)
+            if (tag->name && !strcmp(tag->name, name))
+                break;
 
     if (tag) {
         // If there was a forward declaration in the current scope, use that
@@ -608,14 +664,26 @@ expr_t *make_sym(sema_t *self, const char *name)
 
     // Create expression based on symbol type
     expr_t *expr;
-    if (sym->offset == -1) {
+
+    switch (sym->kind) {
+    case SYM_TYPEDEF:
+        err("Invalid use of typedef name %s", name);
+    case SYM_EXTERN:
+    case SYM_STATIC:
         expr = make_expr(EXPR_GLOBAL);
+        expr->ty = clone_ty(sym->ty);
         expr->str = strdup(name);
-    } else {
+        break;
+    case SYM_LOCAL:
         expr = make_expr(EXPR_LOCAL);
+        expr->ty = clone_ty(sym->ty);
         expr->offset = sym->offset;
+        break;
+    case SYM_ENUM_CONST:
+        expr = make_const(make_ty(TY_INT), sym->val);
+        break;
     }
-    expr->ty = clone_ty(sym->ty);
+
     return expr;
 }
 
@@ -785,30 +853,36 @@ expr_t *make_unary(int kind, expr_t *arg1)
     return expr;
 }
 
+static memb_t *find_memb(ty_t *ty, const char *name)
+{
+    if (ty->kind != TY_TAG
+            || (ty->tag->kind != TAG_STRUCT && ty->tag->kind != TAG_UNION)
+            || !ty->tag->defined)
+        return NULL;
+
+    for (memb_t *memb = ty->tag->members; memb; memb = memb->next) {
+        if (!memb->name) {
+            memb_t *result = find_memb(memb->ty, name);
+            if (result)
+                return result;
+        } else if (!strcmp(memb->name, name)) {
+            return memb;
+        }
+    }
+
+    return NULL;
+}
+
 expr_t *make_memb_expr(expr_t *arg1, const char *name)
 {
     expr_t *expr = make_expr(EXPR_MEMB);
     expr->arg1 = arg1;
-
-    if (arg1->ty->kind != TY_TAG)
-        goto err;
-
-    tag_t *tag = arg1->ty->tag;
-    if (tag->kind != TAG_STRUCT && tag->kind != TAG_UNION)
-        goto err;
-    if (!tag->defined)
-        goto err;
-
-    for (memb_t *memb = tag->members; memb; memb = memb->next)
-        if (!strcmp(memb->name, name)) {
-            expr->ty = clone_ty(memb->ty);
-            expr->offset = memb->offset;
-            return expr;
-        }
-
-err:
-    print_ty_r(arg1->ty);
-    err(" has no member %s\n", name);
+    memb_t *memb = find_memb(arg1->ty, name);
+    if (!memb)
+        err("Failed to access member %s", name);
+    expr->ty = clone_ty(memb->ty);
+    expr->offset = memb->offset;
+    return expr;
 }
 
 expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
@@ -826,13 +900,34 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     }
 
     case EXPR_MUL:
+        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
+            arg1->val *= arg2->val;
+            return arg1;
+        }
+        expr->ty = arg1->ty;
+        break;
     case EXPR_DIV:
+        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
+            arg1->val /= arg2->val;
+            return arg1;
+        }
+        expr->ty = arg1->ty;
+        break;
     case EXPR_MOD:
+        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
+            arg1->val %= arg2->val;
+            return arg1;
+        }
         expr->ty = arg1->ty;
         break;
 
     case EXPR_ADD:
     {
+        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
+            arg1->val += arg2->val;
+            return arg1;
+        }
+
         ty_t *ty;
 
         if ((ty = find_ptr_base(arg1->ty))) {
@@ -856,6 +951,11 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     }
 
     case EXPR_SUB:
+        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
+            arg1->val -= arg2->val;
+            return arg1;
+        }
+
         expr->ty = arg1->ty;
         break;
 

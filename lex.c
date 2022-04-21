@@ -108,11 +108,12 @@ static int lex_check_keyword(lexer_t *self)
     if (!strcmp(spelling, "goto"))          return TK_GOTO;
     if (!strcmp(spelling, "if"))            return TK_IF;
     if (!strcmp(spelling, "inline"))        return TK_INLINE;
+    if (!strcmp(spelling, "__inline"))      return TK_INLINE;   // [GNU]
     if (!strcmp(spelling, "int"))           return TK_INT;
     if (!strcmp(spelling, "long"))          return TK_LONG;
     if (!strcmp(spelling, "register"))      return TK_REGISTER;
     if (!strcmp(spelling, "restrict"))      return TK_RESTRICT;
-    if (!strcmp(spelling, "return "))       return TK_RETURN;
+    if (!strcmp(spelling, "return"))        return TK_RETURN;
     if (!strcmp(spelling, "short"))         return TK_SHORT;
     if (!strcmp(spelling, "signed"))        return TK_SIGNED;
     if (!strcmp(spelling, "sizeof"))        return TK_SIZEOF;
@@ -181,6 +182,14 @@ static int lex_unescape(lexer_t *self)
     }
 }
 
+static void lex_int_suffix(lexer_t *self)
+{
+    // FIXME: this is not really correct
+    while (lex_match(self, 'u') || lex_match(self, 'U')
+            || lex_match(self, 'l') || lex_match(self, 'L'))
+        ;
+}
+
 static int lex_next(lexer_t *self)
 {
     int ch;
@@ -239,6 +248,7 @@ retry:
                     self->tk->val = (self->tk->val << 4) | (ch - 'A' + 0xa);
                     break;
                 default:
+                    lex_int_suffix(self);
                     return TK_CONSTANT;
                 }
         }
@@ -250,6 +260,7 @@ retry:
                 self->tk->val = (self->tk->val << 3) | (ch - '0');
                 break;
             default:
+                lex_int_suffix(self);
                 return TK_CONSTANT;
             }
     case '1' ... '9':
@@ -261,6 +272,7 @@ retry:
                 self->tk->val = self->tk->val * 10 + ch - '0';
                 break;
             default:
+                lex_int_suffix(self);
                 return TK_CONSTANT;
             }
     // Character constant

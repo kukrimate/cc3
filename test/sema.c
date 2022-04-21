@@ -1685,962 +1685,810 @@ struct cc3 {
     gen_t gen;
 };
 void parse(cc3_t *self);
-static inline tk_t *peek(cc3_t *self, int i)
+memb_t *make_memb(ty_t *ty, char *name)
 {
-    return lex_tok(&self->lexer, i);
+    memb_t *memb = calloc(1, sizeof *memb);
+    if (!memb) abort();
+    memb->ty = ty;
+    memb->name = name;
+    return memb;
 }
-static inline void adv(cc3_t *self)
+memb_t *pack_struct(memb_t *members, int *out_align, int *out_size)
 {
-    lex_adv(&self->lexer);
-}
-static inline tk_t *next(cc3_t *self)
-{
-    tk_t *tk = lex_tok(&self->lexer, 0);
-    lex_adv(&self->lexer);
-    return tk;
-}
-static inline tk_t *want(cc3_t *self, int want_type)
-{
-    tk_t *tk = lex_tok(&self->lexer, 0);
-    if (tk->type != want_type)
-        err("Unexpected token %s", tk_str(tk));
-    lex_adv(&self->lexer);
-    return tk;
-}
-static inline tk_t *maybe_want(cc3_t *self, int want_type)
-{
-    tk_t *tk = lex_tok(&self->lexer, 0);
-    if (tk->type == want_type) {
-        lex_adv(&self->lexer);
-        return tk;
+    for (memb_t *memb = members; memb; memb = memb->next) {
+        int memb_align = ty_align(memb->ty);
+        if (memb_align > *out_align)
+            *out_align = memb_align;
+        *out_size = align(*out_size, memb_align);
+        memb->offset = *out_size;
+        *out_size += ty_size(memb->ty);
     }
-    return ((void *)0);
-}
-static expr_t *primary_expression(cc3_t *self);
-static expr_t *postfix_expression(cc3_t *self);
-static expr_t *unary_expression(cc3_t *self);
-static expr_t *cast_expression(cc3_t *self);
-static expr_t *multiplicative_expression(cc3_t *self);
-static expr_t *additive_expression(cc3_t *self);
-static expr_t *shift_expression(cc3_t *self);
-static expr_t *relational_expression(cc3_t *self);
-static expr_t *equality_expression(cc3_t *self);
-static expr_t *and_expression(cc3_t *self);
-static expr_t *xor_expression(cc3_t *self);
-static expr_t *or_expression(cc3_t *self);
-static expr_t *land_expression(cc3_t *self);
-static expr_t *lor_expression(cc3_t *self);
-static expr_t *conditional_expression(cc3_t *self);
-static expr_t *assignment_expression(cc3_t *self);
-static expr_t *expression(cc3_t *self);
-static int constant_expression(cc3_t *self);
-expr_t *primary_expression(cc3_t *self)
-{
-    tk_t *tk = next(self);
-    expr_t *expr;
-    switch (tk->type) {
-    case TK_IDENTIFIER:
-        expr = make_sym(&self->sema, tk_str(tk));
-        break;
-    case TK_CONSTANT:
-        expr = make_const(make_ty(TY_INT), tk->val);
-        break;
-    case TK_STR_LIT:
-        expr = make_str_lit(tk->str.data);
-        break;
-    case TK_LPAREN:
-        expr = expression(self);
-        want(self, TK_RPAREN);
-        break;
-    default:
-        err("Invalid primary expression %s", tk_str(tk));
-    }
-    return expr;
-}
-expr_t *postfix_expression(cc3_t *self)
-{
-    expr_t *expr = primary_expression(self);
-    for (;;) {
-        if (maybe_want(self, TK_LSQ)) {
-            expr = make_unary(EXPR_DREF,
-                make_binary(EXPR_ADD, expr, expression(self)));
-            want(self, TK_RSQ);
-            continue;
-        }
-        if (maybe_want(self, TK_LPAREN)) {
-            expr_t *args = ((void *)0), **tail = &args;
-            if (!maybe_want(self, TK_RPAREN)) {
-                do {
-                    *tail = assignment_expression(self);
-                    tail = &(*tail)->next;
-                } while (maybe_want(self, TK_COMMA));
-                want(self, TK_RPAREN);
-            }
-            expr = make_binary(EXPR_CALL, expr, args);
-            continue;
-        }
-        if (maybe_want(self, TK_DOT)) {
-            const char *name = tk_str(want(self, TK_IDENTIFIER));
-            expr = make_memb_expr(expr, name);
-            continue;
-        }
-        if (maybe_want(self, TK_ARROW)) {
-            const char *name = tk_str(want(self, TK_IDENTIFIER));
-            expr = make_memb_expr(make_unary(EXPR_DREF, expr), name);
-            continue;
-        }
-        if (maybe_want(self, TK_INCR)) {
-            // GNU extension nightmare
-            // ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 122, __func__); }));
-            continue;
-        }
-        if (maybe_want(self, TK_DECR)) {
-            // ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 126, __func__); }));
-            continue;
-        }
-        return expr;
-    }
-}
-static _Bool is_declaration_specifier(cc3_t *self, tk_t *tk);
-static ty_t *type_name(cc3_t *self);
-expr_t *unary_expression(cc3_t *self)
-{
-    if (maybe_want(self, TK_INCR)) {
-        expr_t *arg = unary_expression(self);
-        return make_binary(EXPR_AS, arg,
-            make_binary(EXPR_ADD, arg, make_const(make_ty(TY_INT), 1)));
-    } else if (maybe_want(self, TK_DECR)) {
-        expr_t *arg = unary_expression(self);
-        return make_binary(EXPR_AS, arg,
-            make_binary(EXPR_SUB, arg, make_const(make_ty(TY_INT), 1)));
-    } else if (maybe_want(self, TK_AND)) {
-        return make_unary(EXPR_REF, cast_expression(self));
-    } else if (maybe_want(self, TK_MUL)) {
-        return make_unary(EXPR_DREF, cast_expression(self));
-    } else if (maybe_want(self, TK_ADD)) {
-        return cast_expression(self);
-    } else if (maybe_want(self, TK_SUB)) {
-        return make_unary(EXPR_NEG, cast_expression(self));
-    } else if (maybe_want(self, TK_NOT)) {
-        return make_unary(EXPR_NOT, cast_expression(self));
-    } else if (maybe_want(self, TK_LNOT)) {
-        return make_unary(EXPR_LNOT, cast_expression(self));
-    } else if (maybe_want(self, TK_SIZEOF)) {
-        ty_t *ty;
-        if (peek(self, 0)->type == TK_LPAREN
-                && is_declaration_specifier(self, peek(self, 1))) {
-            adv(self);
-            ty = type_name(self);
-            want(self, TK_RPAREN);
-        } else {
-            ty = unary_expression(self)->ty;
-        }
-        return make_const(make_ty(TY_ULONG), ty_size(ty));
-    } else {
-        return postfix_expression(self);
-    }
-}
-expr_t *cast_expression(cc3_t *self)
-{
-    if (peek(self, 0)->type == TK_LPAREN
-                && is_declaration_specifier(self, peek(self, 1))) {
-        adv(self);
-        type_name(self);
-        want(self, TK_RPAREN);
-        return cast_expression(self);
-    } else {
-        return unary_expression(self);
-    }
-}
-expr_t *multiplicative_expression(cc3_t *self)
-{
-    expr_t *lhs = cast_expression(self);
-    for (;;)
-        if (maybe_want(self, TK_MUL))
-            lhs = make_binary(EXPR_MUL, lhs, cast_expression(self));
-        else if (maybe_want(self, TK_DIV))
-            lhs = make_binary(EXPR_DIV, lhs, cast_expression(self));
-        else if (maybe_want(self, TK_MOD))
-            lhs = make_binary(EXPR_MOD, lhs, cast_expression(self));
-        else
-            return lhs;
-}
-expr_t *additive_expression(cc3_t *self)
-{
-    expr_t *lhs = multiplicative_expression(self);
-    for (;;)
-        if (maybe_want(self, TK_ADD))
-            lhs = make_binary(EXPR_ADD, lhs, multiplicative_expression(self));
-        else if (maybe_want(self, TK_SUB))
-            lhs = make_binary(EXPR_SUB, lhs, multiplicative_expression(self));
-        else
-            return lhs;
-}
-expr_t *shift_expression(cc3_t *self)
-{
-    expr_t *lhs = additive_expression(self);
-    for (;;)
-        if (maybe_want(self, TK_LSH))
-            lhs = make_binary(EXPR_LSH, lhs, additive_expression(self));
-        else if (maybe_want(self, TK_RSH))
-            lhs = make_binary(EXPR_RSH, lhs, additive_expression(self));
-        else
-            return lhs;
-}
-expr_t *relational_expression(cc3_t *self)
-{
-    expr_t *lhs = shift_expression(self);
-    for (;;)
-        if (maybe_want(self, TK_LT))
-            lhs = make_binary(EXPR_LT, lhs, shift_expression(self));
-        else if (maybe_want(self, TK_GT))
-            lhs = make_binary(EXPR_GT, lhs, shift_expression(self));
-        else if (maybe_want(self, TK_LE))
-            lhs = make_binary(EXPR_LE, lhs, shift_expression(self));
-        else if (maybe_want(self, TK_GE))
-            lhs = make_binary(EXPR_GE, lhs, shift_expression(self));
-        else
-            return lhs;
-}
-expr_t *equality_expression(cc3_t *self)
-{
-    expr_t *lhs = relational_expression(self);
-    for (;;)
-        if (maybe_want(self, TK_EQ))
-            lhs = make_binary(EXPR_EQ, lhs, relational_expression(self));
-        else if (maybe_want(self, TK_NE))
-            lhs = make_binary(EXPR_NE, lhs, relational_expression(self));
-        else
-            return lhs;
-}
-expr_t *and_expression(cc3_t *self)
-{
-    expr_t *lhs = equality_expression(self);
-    while (maybe_want(self, TK_AND))
-        lhs = make_binary(EXPR_AND, lhs, equality_expression(self));
-    return lhs;
-}
-expr_t *xor_expression(cc3_t *self)
-{
-    expr_t *lhs = and_expression(self);
-    while (maybe_want(self, TK_XOR))
-        lhs = make_binary(EXPR_XOR, lhs, and_expression(self));
-    return lhs;
-}
-expr_t *or_expression(cc3_t *self)
-{
-    expr_t *lhs = xor_expression(self);
-    while (maybe_want(self, TK_OR))
-        lhs = make_binary(EXPR_OR, lhs, xor_expression(self));
-    return lhs;
-}
-expr_t *land_expression(cc3_t *self)
-{
-    expr_t *lhs = or_expression(self);
-    while (maybe_want(self, TK_LAND))
-        lhs = make_binary(EXPR_LAND, lhs, or_expression(self));
-    return lhs;
-}
-expr_t *lor_expression(cc3_t *self)
-{
-    expr_t *lhs = land_expression(self);
-    while (maybe_want(self, TK_LOR))
-        lhs = make_binary(EXPR_LOR, lhs, land_expression(self));
-    return lhs;
-}
-expr_t *conditional_expression(cc3_t *self)
-{
-    expr_t *lhs = lor_expression(self);
-    if (!maybe_want(self, TK_COND))
-        return lhs;
-    expr_t *mid = expression(self);
-    want(self, TK_COLON);
-    return make_trinary(EXPR_COND, lhs, mid, conditional_expression(self));
-}
-expr_t *assignment_expression(cc3_t *self)
-{
-    expr_t *lhs = conditional_expression(self);
-    if (maybe_want(self, TK_AS))
-        return make_binary(EXPR_AS, lhs, assignment_expression(self));
-    else if (maybe_want(self, TK_MUL_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_MUL, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_DIV_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_DIV, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_MOD_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_MOD, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_ADD_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_ADD, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_SUB_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_SUB, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_LSH_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_LSH, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_RSH_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_RSH, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_AND_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_AND, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_XOR_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_XOR, lhs, assignment_expression(self)));
-    else if (maybe_want(self, TK_OR_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_OR, lhs, assignment_expression(self)));
-    else
-        return lhs;
-}
-expr_t *expression(cc3_t *self)
-{
-    expr_t *lhs = assignment_expression(self);
-    while (maybe_want(self, TK_COMMA))
-        lhs = make_binary(EXPR_SEQ, lhs, assignment_expression(self));
-    return lhs;
-}
-int constant_expression(cc3_t *self)
-{
-    expr_t *expr = conditional_expression(self);
-    if (expr->kind != EXPR_CONST)
-        err("Expected constant expression");
-    return expr->val;
-}
-static expr_t *initializer_list(cc3_t *self);
-static expr_t *initializer(cc3_t *self)
-{
-    if (maybe_want(self, TK_LCURLY))
-        return initializer_list(self);
-    else
-        return assignment_expression(self);
-}
-static expr_t *initializer_list(cc3_t *self)
-{
-    expr_t *head = ((void *)0), **tail = &head;
-    for (;;) {
-        *tail = initializer(self);
-        tail = &(*tail)->next;
-        if (maybe_want(self, TK_COMMA)) {
-            if (maybe_want(self, TK_RCURLY))
-                break;
-        } else {
-            want(self, TK_RCURLY);
-            break;
-        }
-    }
-    return make_unary(EXPR_INIT, head);
-}
-static ty_t *declaration_specifiers(cc3_t *self, int *out_sc);
-static ty_t *declarator(cc3_t *self, ty_t *ty, _Bool allow_abstract, char **out_name);
-static memb_t *member_list(cc3_t *self)
-{
-    memb_t *members = ((void *)0), **tail = &members;
-    do {
-        int sc;
-        ty_t *base_ty = declaration_specifiers(self, &sc);
-        if (!base_ty)
-            err("Expected declaration in struct/union");
-        if (sc != -1)
-            err("Storge class not allowed in struct/union");
-        if (!maybe_want(self, TK_SEMICOLON)) {
-            do {
-                char *name;
-                ty_t *ty = declarator(self, clone_ty(base_ty), 0, &name);
-                *tail = make_memb(ty, name);
-                tail = &(*tail)->next;
-            } while (maybe_want(self, TK_COMMA));
-            want(self, TK_SEMICOLON);
-        } else {
-        }
-        free_ty(base_ty);
-    } while (!maybe_want(self, TK_RCURLY));
+    *out_size = align(*out_size, *out_align);
     return members;
 }
-static tag_t *struct_specifier(cc3_t *self)
+memb_t *pack_union(memb_t *members, int *out_align, int *out_size)
 {
-    tk_t *tk;
-    tag_t *tag;
-    if ((tk = maybe_want(self, TK_IDENTIFIER))) {
-        if (maybe_want(self, TK_LCURLY)) {
-            tag = sema_define_tag(&self->sema, TAG_STRUCT, tk_str(tk));
-            tag->members = pack_struct(member_list(self), &tag->align, &tag->size);
-        } else {
-            tag = sema_forward_declare_tag(&self->sema, TAG_STRUCT, tk_str(tk));
-        }
-    } else {
-        want(self, TK_LCURLY);
-        tag = sema_define_tag(&self->sema, TAG_STRUCT, ((void *)0));
-        tag->members = pack_struct(member_list(self), &tag->align, &tag->size);
+    for (memb_t *memb = members; memb; memb = memb->next) {
+        int memb_align = ty_align(memb->ty);
+        int memb_size = ty_size(memb->ty);
+        if (memb_align > *out_align)
+            *out_align = memb_align;
+        if (memb_size > *out_size)
+            *out_size = memb_size;
     }
-    return tag;
+    return members;
 }
-static tag_t *union_specifier(cc3_t *self)
+ty_t *make_ty(int kind)
 {
-    tk_t *tk;
-    tag_t *tag;
-    if ((tk = maybe_want(self, TK_IDENTIFIER))) {
-        if (maybe_want(self, TK_LCURLY)) {
-            tag = sema_define_tag(&self->sema, TAG_UNION, tk_str(tk));
-            tag->members = pack_union(member_list(self), &tag->align, &tag->size);
-        } else {
-            tag = sema_forward_declare_tag(&self->sema, TAG_UNION, tk_str(tk));
-        }
-    } else {
-        want(self, TK_LCURLY);
-        tag = sema_define_tag(&self->sema, TAG_UNION, ((void *)0));
-        tag->members = pack_union(member_list(self), &tag->align, &tag->size);
+    ty_t *ty = calloc(1, sizeof *ty);
+    if (!ty) abort();
+    ty->kind = kind;
+    return ty;
+}
+ty_t *make_ty_tag(tag_t *tag)
+{
+    ty_t *ty = make_ty(TY_TAG);
+    ty->tag = tag;
+    return ty;
+}
+ty_t *make_pointer(ty_t *base_ty)
+{
+    ty_t *ty = make_ty(TY_POINTER);
+    ty->pointer.base_ty = base_ty;
+    return ty;
+}
+ty_t *make_array(ty_t *elem_ty, int cnt)
+{
+    ty_t *ty = make_ty(TY_ARRAY);
+    ty->array.elem_ty = elem_ty;
+    ty->array.cnt = cnt;
+    return ty;
+}
+ty_t *make_param(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_VOID:
+        err("Parameter type cannot be void");
+    case TY_ARRAY: {
+        ty_t *elem_ty = ty->array.elem_ty;
+        free(ty);
+        return make_pointer(elem_ty);
     }
-    return tag;
-}
-static void enumerator_list(cc3_t *self)
-{
-    val_t cur = 0;
-    for (;; ++cur) {
-        char *name = strdup(tk_str(want(self, TK_IDENTIFIER)));
-        if (maybe_want(self, TK_AS))
-            cur = constant_expression(self);
-        sema_declare_enum_const(&self->sema, name, cur);
-        if (maybe_want(self, TK_COMMA)) {
-            if (maybe_want(self, TK_RCURLY))
-                return;
-        } else {
-            want(self, TK_RCURLY);
-            return;
-        }
-    }
-}
-static tag_t *enum_specifier(cc3_t *self)
-{
-    tk_t *tk;
-    tag_t *tag;
-    if ((tk = maybe_want(self, TK_IDENTIFIER))) {
-        if (maybe_want(self, TK_LCURLY)) {
-            sema_define_tag(&self->sema, TAG_ENUM, tk_str(tk));
-            enumerator_list(self);
-        } else {
-            sema_forward_declare_tag(&self->sema, TAG_ENUM, tk_str(tk));
-        }
-    } else {
-        want(self, TK_LCURLY);
-        tag = sema_define_tag(&self->sema, TAG_ENUM, ((void *)0));
-        enumerator_list(self);
-    }
-    return tag;
-}
-enum {
-    TS_VOID, TS_CHAR, TS_SHORT, TS_INT, TS_LONG, TS_FLOAT, TS_DOUBLE,
-    TS_SIGNED, TS_UNSIGNED, TS_BOOL, TS_COMPLEX, TS_IMAGINARY, NUM_TS
-};
-static ty_t *decode_ts(int ts[static NUM_TS])
-{
-    /*static const struct {
-        int ts[NUM_TS];
-        int kind;
-    } maps[] = {
-        { { [TS_VOID] = 1 }, TY_VOID },
-        { { [TS_CHAR] = 1 }, TY_CHAR },
-        { { [TS_SIGNED] = 1, [TS_CHAR] = 1 }, TY_SCHAR },
-        { { [TS_UNSIGNED] = 1, [TS_CHAR] = 1 }, TY_UCHAR },
-        { { [TS_SHORT] = 1 }, TY_SHORT },
-        { { [TS_SIGNED] = 1, [TS_SHORT] = 1 }, TY_SHORT },
-        { { [TS_SHORT] = 1, [TS_INT] = 1 }, TY_SHORT },
-        { { [TS_SIGNED] = 1, [TS_SHORT] = 1, [TS_INT] = 1 }, TY_SHORT },
-        { { [TS_UNSIGNED] = 1, [TS_SHORT] = 1 }, TY_USHORT },
-        { { [TS_UNSIGNED] = 1, [TS_SHORT] = 1, [TS_INT] = 1 }, TY_USHORT },
-        { { [TS_INT] = 1 }, TY_INT },
-        { { [TS_SIGNED] = 1 }, TY_INT },
-        { { [TS_SIGNED] = 1, [TS_INT] = 1 }, TY_INT },
-        { { [TS_UNSIGNED] = 1 }, TY_UINT },
-        { { [TS_UNSIGNED] = 1, [TS_INT] = 1 }, TY_UINT },
-        { { [TS_LONG] = 1 }, TY_LONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 1 }, TY_LONG },
-        { { [TS_LONG] = 1, [TS_INT] = 1 }, TY_LONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 1, [TS_INT] = 1 }, TY_LONG },
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 1 }, TY_ULONG },
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 1, [TS_INT] = 1 }, TY_ULONG },
-        { { [TS_LONG] = 2 }, TY_LLONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 2 }, TY_LLONG },
-        { { [TS_LONG] = 2, [TS_INT] = 1 }, TY_LLONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 2, [TS_INT] = 1 }, TY_LLONG },
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 2 }, TY_ULLONG },
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 2, [TS_INT] = 1 }, TY_ULLONG },
-        { { [TS_FLOAT] = 1 }, TY_FLOAT },
-        { { [TS_DOUBLE] = 1 }, TY_DOUBLE },
-        { { [TS_LONG] = 1, [TS_DOUBLE] = 1 }, TY_LDOUBLE },
-        { { [TS_BOOL] = 1 }, TY_BOOL },
-    };
-    for (int i = 0; i < sizeof maps / sizeof *maps; ++i)
-        if (memcmp(ts, maps[i].ts, sizeof maps[i].ts) == 0)
-            return make_ty(maps[i].kind);*/
-    err("Provided type specifiers do not name a valid type");
-}
-ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
-{
-    _Bool match = 0;
-    *out_sc = -1;
-    ty_t *ty = ((void *)0);
-    _Bool had_ts = 0;
-    int ts[NUM_TS] = {0};
-    for (;;) {
-        tk_t *tk = peek(self, 0);
-        switch (tk->type) {
-        case TK_TYPEDEF:
-        case TK_EXTERN:
-        case TK_STATIC:
-        case TK_AUTO:
-        case TK_REGISTER:
-            if (*out_sc != -1)
-                err("Duplicate storage class");
-            *out_sc = tk->type;
-            break;
-        case TK_CONST:
-        case TK_RESTRICT:
-        case TK_VOLATILE:
-            break;
-        case TK_INLINE:
-            break;
-        case TK_VOID:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_VOID];
-            break;
-        case TK_CHAR:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_CHAR];
-            break;
-        case TK_SHORT:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_SHORT];
-            break;
-        case TK_INT:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_INT];
-            break;
-        case TK_LONG:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_LONG];
-            break;
-        case TK_FLOAT:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_FLOAT];
-            break;
-        case TK_DOUBLE:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_DOUBLE];
-            break;
-        case TK_SIGNED:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_SIGNED];
-            break;
-        case TK_UNSIGNED:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_UNSIGNED];
-            break;
-        case TK_BOOL:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_BOOL];
-            break;
-        case TK_COMPLEX:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_COMPLEX];
-            break;
-        case TK_IMAGINARY:
-            if (ty) err("Invalid type specifiers");
-            had_ts = 1;
-            ++ts[TS_IMAGINARY];
-            break;
-        case TK_STRUCT:
-            if (ty || had_ts) err("Invalid type specifiers");
-            adv(self);
-            ty = make_ty_tag(struct_specifier(self));
-            goto set_match;
-        case TK_UNION:
-            if (ty || had_ts) err("Invalid type specifiers");
-            adv(self);
-            ty = make_ty_tag(union_specifier(self));
-            goto set_match;
-        case TK_ENUM:
-            if (ty || had_ts) err("Invalid type specifiers");
-            adv(self);
-            ty = make_ty_tag(enum_specifier(self));
-            goto set_match;
-        case TK_IDENTIFIER:
-            if (!ty && !had_ts)
-                if ((ty = sema_findtypedef(&self->sema, tk_str(tk))))
-                    break;
-        default:
-            if (!match)
-                return ((void *)0);
-            if (ty)
-                return ty;
-            return decode_ts(ts);
-        }
-        adv(self);
-set_match:
-        match = 1;
-    }
-}
-static _Bool is_declaration_specifier(cc3_t *self, tk_t *tk)
-{
-    switch (tk->type) {
-    case TK_TYPEDEF:
-    case TK_EXTERN:
-    case TK_STATIC:
-    case TK_AUTO:
-    case TK_REGISTER:
-    case TK_CONST:
-    case TK_RESTRICT:
-    case TK_VOLATILE:
-    case TK_INLINE:
-    case TK_VOID:
-    case TK_CHAR:
-    case TK_SHORT:
-    case TK_INT:
-    case TK_LONG:
-    case TK_FLOAT:
-    case TK_DOUBLE:
-    case TK_SIGNED:
-    case TK_UNSIGNED:
-    case TK_BOOL:
-    case TK_COMPLEX:
-    case TK_IMAGINARY:
-    case TK_STRUCT:
-    case TK_UNION:
-    case TK_ENUM:
-        return 1;
-    case TK_IDENTIFIER:
-        return sema_findtypedef(&self->sema, tk_str(tk)) != ((void *)0);
+    case TY_FUNCTION:
+        return make_pointer(ty);
     default:
-        return 0;
-    }
-}
-static void type_qualifier_list(cc3_t *self)
-{
-    for (;;)
-        switch (peek(self, 0)->type) {
-        case TK_CONST:
-        case TK_RESTRICT:
-        case TK_VOLATILE:
-            adv(self);
-            break;
-        default:
-            return;
-        }
-}
-static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
-{
-    for (;;) {
-        if (maybe_want(self, TK_LSQ)) {
-            type_qualifier_list(self);
-            maybe_want(self, TK_STATIC);
-            type_qualifier_list(self);
-            int cnt = -1;
-            if (!maybe_want(self, TK_RSQ)) {
-                cnt = constant_expression(self);
-                want(self, TK_RSQ);
-            }
-            ty = make_array(ty, cnt);
-            continue;
-        }
-        if (maybe_want(self, TK_LPAREN)) {
-            sema_enter(&self->sema);
-            ty_t *param_tys = ((void *)0), **tail = &param_tys;
-            _Bool var = 0;
-            if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
-                adv(self);
-                adv(self);
-            } else {
-                for (;;) {
-                    int sc;
-                    if (!(*tail = declaration_specifiers(self, &sc)))
-                        break;
-                    char *name;
-                    *tail = make_param(declarator(self, *tail, 1, &name));
-                    if (name)
-                        sema_declare(&self->sema, sc, clone_ty(*tail), name);
-                    if (!maybe_want(self, TK_COMMA))
-                        break;
-                    if (maybe_want(self, TK_ELLIPSIS)) {
-                        var = 1;
-                        break;
-                    }
-                    tail = &(*tail)->next;
-                }
-                want(self, TK_RPAREN);
-            }
-            ty = make_function(ty, param_tys, var);
-            // FIXME: gnu anonymous union hell
-            // ty->function.scope = sema_pop(&self->sema);
-            continue;
-        }
         return ty;
     }
 }
-ty_t *declarator(cc3_t *self, ty_t *ty, _Bool allow_abstract,
-    char **out_name)
+ty_t *make_function(ty_t *ret_ty, ty_t *param_tys, _Bool var)
 {
-    while (maybe_want(self, TK_MUL)) {
-        type_qualifier_list(self);
-        ty = make_pointer(ty);
-    }
-    if (maybe_want(self, TK_LPAREN)) {
-        ty_t *dummy = calloc(1, sizeof *dummy);
-        ty_t *result = declarator(self, dummy, allow_abstract, out_name);
-        want(self, TK_RPAREN);
-        ty = declarator_suffixes(self, ty);
-        *dummy = *ty;
-        free(ty);
-        return result;
-    }
-    tk_t *tk;
-    if (allow_abstract) {
-        if ((tk = maybe_want(self, TK_IDENTIFIER)))
-            *out_name = strdup(tk_str(tk));
-        else
-            *out_name = ((void *)0);
-    } else {
-        tk = want(self, TK_IDENTIFIER);
-        *out_name = strdup(tk_str(tk));
-    }
-    return declarator_suffixes(self, ty);
-}
-static ty_t *type_name(cc3_t *self)
-{
-    int sc;
-    ty_t *ty = declaration_specifiers(self, &sc);
-    if (!ty)
-        err("Expected type name");
-    if (sc != -1)
-        err("No storage class allowed");
-    char *name;
-    ty = declarator(self, ty, 1, &name);
-    if (name)
-        err("Only abstract declarators are allowed");
+    ty_t *ty = make_ty(TY_FUNCTION);
+    if (ret_ty->kind == TY_ARRAY)
+        err("Function returning array");
+    if (ret_ty->kind == TY_FUNCTION)
+        err("Function returning function");
+    ty->function.ret_ty = ret_ty;
+    ty->function.param_tys = param_tys;
+    ty->function.var = var;
     return ty;
 }
-static inline void append_stmt(stmt_t ***tail, stmt_t *stmt)
+ty_t *clone_ty(ty_t *ty)
 {
-    **tail = stmt;
-    *tail = &(**tail)->next;
-}
-static _Bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
-{
-    int sc;
-    ty_t *base_ty = declaration_specifiers(self, &sc);
-    if (!base_ty)
-        return 0;
-    if (!maybe_want(self, TK_SEMICOLON)) {
-        do {
-            char *name;
-            ty_t *ty = declarator(self, clone_ty(base_ty), 0, &name);
-            sym_t *sym = sema_declare(&self->sema, sc, ty, name);
-            if (maybe_want(self, TK_AS)) {
-                expr_t *expr = initializer(self);
-                if (sym->offset != -1) {
-                    stmt_t *stmt = make_stmt(STMT_INIT);
-                    stmt->init.ty = clone_ty(sym->ty);
-                    stmt->init.offset = sym->offset;
-                    stmt->arg1 = expr;
-                    append_stmt(tail, stmt);
-                } else {
-                    // ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 1052, __func__); }));
-                }
-            }
-        } while (maybe_want(self, TK_COMMA));
-        want(self, TK_SEMICOLON);
+    switch (ty->kind) {
+    case TY_VOID:
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+    case TY_BOOL:
+        return make_ty(ty->kind);
+    case TY_TAG:
+        return make_ty_tag(ty->tag);
+    case TY_POINTER:
+        return make_pointer(clone_ty(ty->pointer.base_ty));
+    case TY_ARRAY:
+        return make_array(clone_ty(ty->array.elem_ty), ty->array.cnt);
+    case TY_FUNCTION:
+    {
+        ty_t *param_tys = ((void *)0), **tail = &param_tys;
+        for (ty_t *param_ty = ty->function.param_tys; param_ty; param_ty = param_ty->next) {
+            *tail = clone_ty(param_ty);
+            tail = &(*tail)->next;
+        }
+        return make_function(clone_ty(ty->function.ret_ty), param_tys, ty->function.var);
     }
-    free_ty(base_ty);
-    return 1;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 153, __func__); }));
+    }
 }
-static void statement(cc3_t *self, stmt_t ***tail);
-static inline void block_item_list(cc3_t *self, stmt_t ***tail)
+void free_ty(ty_t *ty)
 {
-    while (!maybe_want(self, TK_RCURLY))
-        if (!block_scope_declaration(self, tail))
-            statement(self, tail);
+    switch (ty->kind) {
+    case TY_VOID:
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+    case TY_BOOL:
+    case TY_TAG:
+        break;
+    case TY_POINTER:
+        free_ty(ty->pointer.base_ty);
+        break;
+    case TY_ARRAY:
+        free_ty(ty->array.elem_ty);
+        break;
+    case TY_FUNCTION:
+        free_ty(ty->function.ret_ty);
+        for (ty_t *param_ty = ty->function.param_tys; param_ty; ) {
+            ty_t *tmp = param_ty->next;
+            free_ty(param_ty);
+            param_ty = tmp;
+        }
+        break;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 197, __func__); }));
+    }
+    free(ty);
 }
-static inline stmt_t *read_stmt(cc3_t *self)
+static void print_ty_r(ty_t *ty)
 {
-    stmt_t *head = ((void *)0), **tail = &head;
-    statement(self, &tail);
-    return head;
-}
-void statement(cc3_t *self, stmt_t ***tail)
-{
-    tk_t *tk;
-    for (;;) {
-        if ((tk = peek(self, 0))->type == TK_IDENTIFIER
-                && peek(self, 1)->type == TK_COLON) {
-            stmt_t *stmt = make_stmt(STMT_LABEL);
-            stmt->label = strdup(tk_str(tk));
-            adv(self);
-            adv(self);
-            append_stmt(tail, stmt);
-        } else if (maybe_want(self, TK_CASE)) {
-            stmt_t *stmt = make_stmt(STMT_CASE);
-            stmt->case_val = constant_expression(self);
-            want(self, TK_COLON);
-            append_stmt(tail, stmt);
-        } else if (maybe_want(self, TK_DEFAULT)) {
-            want(self, TK_COLON);
-            append_stmt(tail, make_stmt(STMT_DEFAULT));
-        } else {
+    switch (ty->kind) {
+    case TY_VOID: printf("void"); break;
+    case TY_CHAR: printf("char"); break;
+    case TY_SCHAR: printf("signed char"); break;
+    case TY_UCHAR: printf("unsigned char"); break;
+    case TY_SHORT: printf("short"); break;
+    case TY_USHORT: printf("unsigned short"); break;
+    case TY_INT: printf("int"); break;
+    case TY_UINT: printf("unsigned int"); break;
+    case TY_LONG: printf("long"); break;
+    case TY_ULONG: printf("unsigned long"); break;
+    case TY_LLONG: printf("long long"); break;
+    case TY_ULLONG: printf("unsigned long long"); break;
+    case TY_FLOAT: printf("float"); break;
+    case TY_DOUBLE: printf("double"); break;
+    case TY_LDOUBLE: printf("long double"); break;
+    case TY_BOOL: printf("_Bool"); break;
+    case TY_TAG:
+        switch (ty->tag->kind) {
+        case TAG_STRUCT:
+            if (ty->tag->name)
+                printf("struct %s", ty->tag->name);
+            else
+                printf("struct");
+            break;
+        case TAG_UNION:
+            if (ty->tag->name)
+                printf("union %s", ty->tag->name);
+            else
+                printf("union");
+            break;
+        case TAG_ENUM:
+            if (ty->tag->name)
+                printf("enum %s", ty->tag->name);
+            else
+                printf("enum");
             break;
         }
-    }
-    if (maybe_want(self, TK_LCURLY)) {
-        sema_enter(&self->sema);
-        block_item_list(self, tail);
-        sema_exit(&self->sema);
-        return;
-    }
-    if (maybe_want(self, TK_IF)) {
-        stmt_t *stmt = make_stmt(STMT_IF);
-        want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
-        want(self, TK_RPAREN);
-        stmt->body1 = read_stmt(self);
-        if (maybe_want(self, TK_ELSE))
-            stmt->body2 = read_stmt(self);
-        append_stmt(tail, stmt);
-        return;
-    }
-    if (maybe_want(self, TK_SWITCH)) {
-        stmt_t *stmt = make_stmt(STMT_SWITCH);
-        want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
-        want(self, TK_RPAREN);
-        stmt->body1 = read_stmt(self);
-        append_stmt(tail, stmt);
-        return;
-    }
-    if (maybe_want(self, TK_WHILE)) {
-        stmt_t *stmt = make_stmt(STMT_WHILE);
-        want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
-        want(self, TK_RPAREN);
-        stmt->body1 = read_stmt(self);
-        append_stmt(tail, stmt);
-        return;
-    }
-    if (maybe_want(self, TK_DO)) {
-        stmt_t *stmt = make_stmt(STMT_DO);
-        stmt->body1 = read_stmt(self);
-        want(self, TK_WHILE);
-        want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
-        want(self, TK_RPAREN);
-        want(self, TK_SEMICOLON);
-        append_stmt(tail, stmt);
-        return;
-    }
-    if (maybe_want(self, TK_FOR)) {
-        stmt_t *stmt = make_stmt(STMT_FOR);
-        want(self, TK_LPAREN);
-        sema_enter(&self->sema);
-        if (!block_scope_declaration(self, tail))
-            if (!maybe_want(self, TK_SEMICOLON)) {
-                stmt->arg1 = expression(self);
-                want(self, TK_SEMICOLON);
-            }
-        if (!maybe_want(self, TK_SEMICOLON)) {
-            stmt->arg2 = expression(self);
-            want(self, TK_SEMICOLON);
+        break;
+    case TY_POINTER:
+        print_ty_r(ty->pointer.base_ty);
+        printf("*");
+        break;
+    case TY_ARRAY:
+        print_ty_r(ty->array.elem_ty);
+        if (ty->array.cnt < 0)
+            printf("[]");
+        else
+            printf("[%d]", ty->array.cnt);
+        break;
+    case TY_FUNCTION:
+        print_ty_r(ty->function.ret_ty);
+        printf("(");
+        ty_t *param_ty = ty->function.param_tys;
+        while (param_ty) {
+            print_ty_r(param_ty);
+            if ((param_ty = param_ty->next) || ty->function.var)
+                printf(", ");
         }
-        if (!maybe_want(self, TK_RPAREN)) {
-            stmt->arg3 = expression(self);
-            want(self, TK_RPAREN);
-        }
-        stmt->body1 = read_stmt(self);
-        sema_exit(&self->sema);
-        append_stmt(tail, stmt);
-        return;
-    }
-    if (maybe_want(self, TK_GOTO)) {
-        stmt_t *stmt = make_stmt(STMT_GOTO);
-        want(self, TK_IDENTIFIER);
-        want(self, TK_SEMICOLON);
-        append_stmt(tail, stmt);
-        return;
-    }
-    if (maybe_want(self, TK_CONTINUE)) {
-        want(self, TK_SEMICOLON);
-        append_stmt(tail, make_stmt(STMT_CONTINUE));
-        return;
-    }
-    if (maybe_want(self, TK_BREAK)) {
-        want(self, TK_SEMICOLON);
-        append_stmt(tail, make_stmt(STMT_BREAK));
-        return;
-    }
-    if (maybe_want(self, TK_RETURN)) {
-        stmt_t *stmt = make_stmt(STMT_RETURN);
-        if (!maybe_want(self, TK_SEMICOLON)) {
-            stmt->arg1 = expression(self);
-            want(self, TK_SEMICOLON);
-        }
-        append_stmt(tail, stmt);
-        return;
-    }
-    if (!maybe_want(self, TK_SEMICOLON)) {
-        stmt_t *stmt = make_stmt(STMT_EVAL);
-        stmt->arg1 = expression(self);
-        want(self, TK_SEMICOLON);
-        append_stmt(tail, stmt);
+        if (ty->function.var)
+            printf("...");
+        printf(")");
+        break;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 294, __func__); }));
     }
 }
-static inline stmt_t *read_block(cc3_t *self)
+void print_ty(ty_t *ty)
 {
-    stmt_t *head = ((void *)0), **tail = &head;
-    block_item_list(self, &tail);
-    return head;
+    print_ty_r(ty);
+    printf("\n");
 }
-void parse(cc3_t *self)
+int ty_align(ty_t *ty)
 {
-    int sc;
-    ty_t *base_ty;
-    while ((base_ty = declaration_specifiers(self, &sc))) {
-        if (!maybe_want(self, TK_SEMICOLON)) {
-            char *name;
-            ty_t *ty = declarator(self, clone_ty(base_ty), 0, &name);
-            sym_t *sym = sema_declare(&self->sema, sc, ty, name);
-            if (maybe_want(self, TK_LCURLY)) {
-                if (ty->kind != TY_FUNCTION)
-                    err("Function body after non-function declaration");
-                sym->had_def = 1;
-                self->sema.offset = 0;
-                // FIXME: gnu anonymous union hell
-                // sema_push(&self->sema, ty->function.scope);
-                stmt_t *body = read_block(self);
-                sema_exit(&self->sema);
-                free_ty(base_ty);
-                continue;
-            }
-            if (maybe_want(self, TK_AS))
-                initializer(self);
-            while (maybe_want(self, TK_COMMA)) {
-                char *name;
-                ty_t *ty = declarator(self, clone_ty(base_ty), 0, &name);
-                sema_declare(&self->sema, sc, ty, name);
-                if (maybe_want(self, TK_AS))
-                    initializer(self);
-            }
-            want(self, TK_SEMICOLON);
+    switch (ty->kind) {
+    case TY_CHAR: return 1;
+    case TY_SCHAR: return 1;
+    case TY_UCHAR: return 1;
+    case TY_SHORT: return 2;
+    case TY_USHORT: return 2;
+    case TY_INT: return 4;
+    case TY_UINT: return 4;
+    case TY_LONG: return 8;
+    case TY_ULONG: return 8;
+    case TY_LLONG: return 8;
+    case TY_ULLONG: return 8;
+    case TY_FLOAT: return 4;
+    case TY_DOUBLE: return 8;
+    case TY_LDOUBLE: return 16;
+    case TY_BOOL: return 1;
+    case TY_TAG:
+        ((void) sizeof ((ty->tag->defined) ? 1 : 0), ({ if (ty->tag->defined) ; else __assert_fail ("ty->tag->defined", "sema.c", 324, __func__); }));
+        switch (ty->tag->kind) {
+        case TAG_STRUCT:
+        case TAG_UNION:
+            return ty->tag->align;
+        case TAG_ENUM:
+            return 4;
+        default:
+            ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 332, __func__); }));
         }
-        free_ty(base_ty);
+    case TY_POINTER:
+        return 8;
+    case TY_ARRAY:
+        return ty_align(ty->array.elem_ty);
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 342, __func__); }));
     }
-    want(self, TK_EOF);
+}
+int ty_size(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR: return 1;
+    case TY_SCHAR: return 1;
+    case TY_UCHAR: return 1;
+    case TY_SHORT: return 2;
+    case TY_USHORT: return 2;
+    case TY_INT: return 4;
+    case TY_UINT: return 4;
+    case TY_LONG: return 8;
+    case TY_ULONG: return 8;
+    case TY_LLONG: return 8;
+    case TY_ULLONG: return 8;
+    case TY_FLOAT: return 4;
+    case TY_DOUBLE: return 8;
+    case TY_LDOUBLE: return 16;
+    case TY_BOOL: return 1;
+    case TY_TAG:
+        ((void) sizeof ((ty->tag->defined) ? 1 : 0), ({ if (ty->tag->defined) ; else __assert_fail ("ty->tag->defined", "sema.c", 366, __func__); }));
+        switch (ty->tag->kind) {
+        case TAG_STRUCT:
+        case TAG_UNION:
+            return ty->tag->size;
+        case TAG_ENUM:
+            return 4;
+        default:
+            ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 374, __func__); }));
+        }
+    case TY_POINTER:
+        return 8;
+    case TY_ARRAY:
+        ((void) sizeof ((ty->array.cnt != -1) ? 1 : 0), ({ if (ty->array.cnt != -1) ; else __assert_fail ("ty->array.cnt != -1", "sema.c", 381, __func__); }));
+        return ty_size(ty->array.elem_ty) * ty->array.cnt;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 385, __func__); }));
+    }
+}
+void sema_init(sema_t *self)
+{
+    self->scope = ((void *)0);
+    sema_enter(self);
+}
+void sema_free(sema_t *self)
+{
+    sema_exit(self);
+}
+void sema_enter(sema_t *self)
+{
+    scope_t *scope = calloc(1, sizeof *scope);
+    if (!scope) abort();
+    scope->parent = self->scope;
+    self->scope = scope;
+}
+static void free_members(memb_t *members)
+{
+    for (memb_t *memb = members; memb;) {
+        memb_t *tmp = memb->next;
+        free_ty(memb->ty);
+        if (memb->name)
+            free(memb->name);
+        free(memb);
+        memb = tmp;
+    }
+}
+void sema_exit(sema_t *self)
+{
+    scope_t *scope = self->scope;
+    self->scope = scope->parent;
+    for (sym_t *sym = scope->syms; sym; ) {
+        sym_t *tmp = sym->next;
+        if (sym->kind != SYM_ENUM_CONST)
+            free_ty(sym->ty);
+        free(sym->name);
+        free(sym);
+        sym = tmp;
+    }
+    for (tag_t *tag = scope->tags; tag; ) {
+        tag_t *tmp = tag->next;
+        free(tag->name);
+        if (tag->members)
+            free_members(tag->members);
+        free(tag);
+        tag = tmp;
+    }
+    free(scope);
+}
+void sema_push(sema_t *self, scope_t *scope)
+{
+    scope->parent = self->scope;
+    self->scope = scope;
+}
+scope_t *sema_pop(sema_t *self)
+{
+    scope_t *scope = self->scope;
+    self->scope = scope->parent;
+    return scope;
+}
+static int sym_kind(sema_t *self, int sc)
+{
+    switch (sc) {
+    case TK_TYPEDEF:
+        return SYM_TYPEDEF;
+    case TK_EXTERN:
+        return SYM_EXTERN;
+    case TK_STATIC:
+        return SYM_STATIC;
+    case TK_AUTO:
+    case TK_REGISTER:
+        return SYM_LOCAL;
+    case -1:
+        if (self->scope->parent)
+            return SYM_LOCAL;
+        else
+            return SYM_EXTERN;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 483, __func__); }));
+    }
+}
+sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
+{
+    sym_t *sym;
+    for (sym = self->scope->syms; sym; sym = sym->next)
+        if (!strcmp(sym->name, name))
+            break;
+    if (sym) {
+        int new_kind = sym_kind(self, sc);
+        switch (sym->kind) {
+        case SYM_EXTERN:
+        case SYM_STATIC:
+            if (new_kind == SYM_EXTERN) {
+                break;
+            }
+            if (new_kind == SYM_STATIC) {
+                sym->kind = SYM_STATIC;
+                break;
+            }
+        default:
+            err("Invalid re-declaration of %s", name);
+        }
+        printf("Re-declaration of %s\n", name);
+        return sym;
+    }
+    sym = calloc(1, sizeof *sym);
+    if (!sym) abort();
+    sym->next = self->scope->syms;
+    self->scope->syms = sym;
+    sym->kind = sym_kind(self, sc);
+    if (sym->kind != SYM_TYPEDEF && ty->kind == TY_VOID)
+        err("Tried to declare %s with type void", name);
+    sym->ty = ty;
+    sym->name = name;
+    printf("Declare %s as ", name);
+    print_ty(ty);
+    if (sym->kind == SYM_LOCAL) {
+        self->offset = align(self->offset, ty_align(ty));
+        sym->offset = self->offset;
+        self->offset += ty_size(ty);
+    } else {
+        sym->offset = -1;
+    }
+    return sym;
+}
+sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val)
+{
+    for (sym_t *sym = self->scope->syms; sym; sym = sym->next)
+        if (!strcmp(sym->name, name))
+            err("Invalid re-declaration of %s", name);
+    sym_t *sym = calloc(1, sizeof *sym);
+    if (!sym) abort();
+    sym->next = self->scope->syms;
+    self->scope->syms = sym;
+    sym->kind = SYM_ENUM_CONST;
+    sym->name = name;
+    sym->val = val;
+    return sym;
+}
+sym_t *sema_lookup(sema_t *self, const char *name)
+{
+    for (scope_t *scope = self->scope; scope; scope = scope->parent)
+        for (sym_t *sym = scope->syms; sym; sym = sym->next)
+            if (!strcmp(sym->name, name))
+                return sym;
+    return ((void *)0);
+}
+ty_t *sema_findtypedef(sema_t *self, const char *name)
+{
+    struct sym *sym = sema_lookup(self, name);
+    if (sym && sym->kind == SYM_TYPEDEF) {
+        return clone_ty(sym->ty);
+    }
+    return ((void *)0);
+}
+static tag_t *create_tag(sema_t *self, int kind, const char *name)
+{
+    tag_t *tag = calloc(1, sizeof *tag);
+    if (!tag) abort();
+    tag->next = self->scope->tags;
+    self->scope->tags = tag;
+    tag->kind = kind;
+    tag->name = name ? strdup(name) : ((void *)0);
+    return tag;
+}
+tag_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
+{
+    tag_t *tag = ((void *)0);
+    if (name)
+        for (scope_t *scope = self->scope; scope; scope = scope->parent)
+            for (tag = scope->tags; tag; tag = tag->next)
+                if (tag->name && !strcmp(tag->name, name))
+                    goto found;
+found:
+    if (tag) {
+        if (tag->kind != kind)
+            err("Tag referred to with the wrong keyword");
+    } else {
+        return create_tag(self, kind, name);
+    }
+    return tag;
+}
+tag_t *sema_define_tag(sema_t *self, int kind, const char *name)
+{
+    tag_t *tag = ((void *)0);
+    if (name)
+        for (tag = self->scope->tags; tag; tag = tag->next)
+            if (tag->name && !strcmp(tag->name, name))
+                break;
+    if (tag) {
+        if (tag->kind != kind)
+            err("Tag referred to with the wrong keyword");
+        if (tag->defined)
+            err("Re-definition of tag %s", name);
+    } else {
+        tag = create_tag(self, kind, name);
+    }
+    tag->defined = 1;
+    return tag;
+}
+static expr_t *make_expr(int kind)
+{
+    expr_t *expr = calloc(1, sizeof *expr);
+    if (!expr) abort();
+    expr->kind = kind;
+    return expr;
+}
+expr_t *make_sym(sema_t *self, const char *name)
+{
+    sym_t *sym = sema_lookup(self, name);
+    if (!sym)
+        err("Undeclared identifier %s", name);
+    expr_t *expr;
+    switch (sym->kind) {
+    case SYM_TYPEDEF:
+        err("Invalid use of typedef name %s", name);
+    case SYM_EXTERN:
+    case SYM_STATIC:
+        expr = make_expr(EXPR_GLOBAL);
+        expr->ty = clone_ty(sym->ty);
+        expr->str = strdup(name);
+        break;
+    case SYM_LOCAL:
+        expr = make_expr(EXPR_LOCAL);
+        expr->ty = clone_ty(sym->ty);
+        expr->offset = sym->offset;
+        break;
+    case SYM_ENUM_CONST:
+        expr = make_const(make_ty(TY_INT), sym->val);
+        break;
+    }
+    return expr;
+}
+expr_t *make_const(ty_t *ty, val_t val)
+{
+    expr_t *expr = make_expr(EXPR_CONST);
+    expr->ty = ty;
+    expr->val = val;
+    return expr;
+}
+expr_t *make_str_lit(const char *str)
+{
+    expr_t *expr = make_expr(EXPR_STR_LIT);
+    expr->ty = make_array(make_ty(TY_CHAR), strlen(str) + 1);
+    expr->str = strdup(str);
+    return expr;
+}
+static _Bool is_integer_ty(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_BOOL:
+        return 1;
+    case TY_TAG:
+        return ty->tag->kind == TAG_ENUM && ty->tag->defined;
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+    case TY_POINTER:
+    case TY_ARRAY:
+    case TY_FUNCTION:
+        return 0;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 731, __func__); }));
+    }
+}
+static _Bool is_arith_ty(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_BOOL:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+        return 1;
+    case TY_TAG:
+        return ty->tag->kind == TAG_ENUM && ty->tag->defined;
+    case TY_POINTER:
+    case TY_ARRAY:
+    case TY_FUNCTION:
+        return 0;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 762, __func__); }));
+    }
+}
+static _Bool is_scalar_ty(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_SHORT:
+    case TY_USHORT:
+    case TY_INT:
+    case TY_UINT:
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_BOOL:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+    case TY_POINTER:
+    case TY_ARRAY:
+    case TY_FUNCTION:
+        return 1;
+    case TY_TAG:
+        return ty->tag->kind == TAG_ENUM && ty->tag->defined;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 795, __func__); }));
+    }
+}
+static ty_t *find_ptr_base(ty_t *ty)
+{
+    if (ty->kind == TY_POINTER)
+        return ty->pointer.base_ty;
+    else if (ty->kind == TY_ARRAY)
+        return ty->array.elem_ty;
+    else if (ty->kind == TY_FUNCTION)
+        return ty;
+    else
+        return ((void *)0);
+}
+expr_t *make_unary(int kind, expr_t *arg1)
+{
+    ty_t *ty;
+    switch (kind) {
+    case EXPR_REF:
+        ty = make_pointer(arg1->ty);
+        break;
+    case EXPR_DREF:
+        if (!(ty = find_ptr_base(arg1->ty)))
+            err("Pointer type required");
+        break;
+    case EXPR_POS:
+        if (!is_arith_ty((ty = arg1->ty)))
+            err("Arihmetic type required");
+        return arg1;
+    case EXPR_NEG:
+        if (!is_arith_ty((ty = arg1->ty)))
+            err("Arihmetic type required");
+        break;
+    case EXPR_NOT:
+        if (!is_integer_ty((ty = arg1->ty)))
+            err("Integer type required");
+        break;
+    case EXPR_LNOT:
+        if (!is_scalar_ty((ty = arg1->ty)))
+        ty = make_ty(TY_INT);
+        break;
+    case EXPR_INIT:
+        ty = ((void *)0);
+        break;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 845, __func__); }));
+    }
+    expr_t *expr = make_expr(kind);
+    expr->ty = ty;
+    expr->arg1 = arg1;
+    return expr;
+}
+expr_t *make_memb_expr(expr_t *arg1, const char *name)
+{
+    expr_t *expr = make_expr(EXPR_MEMB);
+    expr->arg1 = arg1;
+    if (arg1->ty->kind != TY_TAG)
+        goto err;
+    tag_t *tag = arg1->ty->tag;
+    if (tag->kind != TAG_STRUCT && tag->kind != TAG_UNION)
+        goto err;
+    if (!tag->defined)
+        goto err;
+    for (memb_t *memb = tag->members; memb; memb = memb->next)
+        if (!strcmp(memb->name, name)) {
+            expr->ty = clone_ty(memb->ty);
+            expr->offset = memb->offset;
+            return expr;
+        }
+err:
+    print_ty_r(arg1->ty);
+    err(" has no member %s\n", name);
+}
+expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
+{
+    expr_t *expr = make_expr(kind);
+    switch (kind) {
+    case EXPR_CALL:
+    {
+        ty_t *func_ty = find_ptr_base(arg1->ty);
+        if (!func_ty || func_ty->kind != TY_FUNCTION)
+            err("Non-function object called");
+        expr->ty = func_ty->function.ret_ty;
+        break;
+    }
+    case EXPR_MUL:
+    case EXPR_DIV:
+    case EXPR_MOD:
+        expr->ty = arg1->ty;
+        break;
+    case EXPR_ADD:
+    {
+        ty_t *ty;
+        if ((ty = find_ptr_base(arg1->ty))) {
+            if (!is_integer_ty(arg2->ty))
+                err("Pointer offset must be integer");
+            arg2 = make_binary(EXPR_MUL, arg2,
+                make_const(make_ty(TY_INT), ty_size(ty)));
+            expr->ty = make_pointer(ty);
+        } else if ((ty = find_ptr_base(arg2->ty))) {
+            if (!is_integer_ty(arg1->ty))
+                err("Pointer offset must be integer");
+            arg1 = make_binary(EXPR_MUL, arg1,
+                make_const(make_ty(TY_INT), ty_size(ty)));
+            expr->ty = make_pointer(ty);
+        } else {
+            if (!is_arith_ty(arg1->ty) || !is_arith_ty(arg2->ty))
+                err("Arihmetic type required");
+            expr->ty = arg1->ty;
+        }
+        break;
+    }
+    case EXPR_SUB:
+        expr->ty = arg1->ty;
+        break;
+    case EXPR_LSH:
+    case EXPR_RSH:
+    case EXPR_AND:
+    case EXPR_XOR:
+    case EXPR_OR:
+        expr->ty = arg1->ty;
+        break;
+    case EXPR_LT:
+    case EXPR_GT:
+    case EXPR_LE:
+    case EXPR_GE:
+    case EXPR_EQ:
+    case EXPR_NE:
+    case EXPR_LAND:
+    case EXPR_LOR:
+        expr->ty = make_ty(TY_INT);
+        break;
+    case EXPR_AS:
+        expr->ty = arg1->ty;
+        break;
+    case EXPR_SEQ:
+        expr->ty = arg2->ty;
+        break;
+    default:
+        ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "sema.c", 956, __func__); }));
+    }
+    expr->arg1 = arg1;
+    expr->arg2 = arg2;
+    return expr;
+}
+expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
+{
+    expr_t *expr = make_expr(kind);
+    ((void) sizeof ((kind == EXPR_COND) ? 1 : 0), ({ if (kind == EXPR_COND) ; else __assert_fail ("kind == EXPR_COND", "sema.c", 966, __func__); }));
+    expr->ty = arg2->ty;
+    expr->arg1 = arg1;
+    expr->arg2 = arg2;
+    expr->arg3 = arg3;
+    return expr;
+}
+stmt_t *make_stmt(int kind)
+{
+    stmt_t *stmt = calloc(1, sizeof *stmt);
+    if (!stmt) abort();
+    stmt->kind = kind;
+    return stmt;
 }

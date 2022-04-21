@@ -23,4 +23,17 @@ int main(void)
     bar_t bar = { 1, 65537 };
     printf("bar.a = %d\n", bar.a);
     printf("bar.b = %d\n", bar.b);
+
+    // Anonymous union
+    struct ty {
+        union {
+            int a;
+            int b;
+            int c;
+        };
+    } ty = { { 0xdeadc0de } };
+
+    printf("%x\n", ty.a);
+    printf("%x\n", ty.b);
+    printf("%x\n", ty.c);
 }
