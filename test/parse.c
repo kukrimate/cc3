@@ -11,9 +11,6 @@ extern void __assert (const char *__assertion, const char *__file, int __line)
 
 extern int *__errno_location (void) ;
 
-// FIXME: implement this
-typedef void *__builtin_va_list;
-
 typedef __builtin_va_list __gnuc_va_list;
 typedef __gnuc_va_list va_list;
 
@@ -1513,8 +1510,10 @@ enum {
     TY_FUNCTION,
 };
 typedef struct scope scope_t;
+typedef struct sym sym_t;
 struct ty {
     ty_t *next;
+    sym_t *sym;
     int kind;
     union {
         tag_t *tag;
@@ -1551,7 +1550,6 @@ enum {
     SYM_LOCAL,
     SYM_ENUM_CONST,
 };
-typedef struct sym sym_t;
 struct sym {
     sym_t *next;
     int kind;
@@ -1569,6 +1567,7 @@ struct scope {
 typedef struct sema sema_t;
 struct sema {
     scope_t *scope;
+    const char *func_name;
     int offset;
 };
 void sema_init(sema_t *self);
@@ -1618,8 +1617,10 @@ enum {
     EXPR_COND,
     EXPR_SEQ,
     EXPR_INIT,
+    EXPR_STMT,
 };
 typedef struct expr expr_t;
+typedef struct stmt stmt_t;
 struct expr {
     expr_t *next;
     int kind;
@@ -1628,10 +1629,12 @@ struct expr {
     char *str;
     val_t val;
     expr_t *arg1, *arg2, *arg3;
+    stmt_t *body;
 };
 expr_t *make_sym(sema_t *self, const char *name);
 expr_t *make_const(ty_t *ty, val_t val);
 expr_t *make_str_lit(const char *str);
+expr_t *make_stmt_expr(stmt_t *body);
 expr_t *make_unary(int kind, expr_t *arg1);
 expr_t *make_memb_expr(expr_t *arg1, const char *name);
 expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2);
@@ -1652,7 +1655,6 @@ enum {
     STMT_INIT,
     STMT_EVAL,
 };
-typedef struct stmt stmt_t;
 struct stmt {
     stmt_t *next;
     int kind;
@@ -1734,6 +1736,7 @@ static expr_t *conditional_expression(cc3_t *self);
 static expr_t *assignment_expression(cc3_t *self);
 static expr_t *expression(cc3_t *self);
 static int constant_expression(cc3_t *self);
+static stmt_t *read_block(cc3_t *self);
 expr_t *primary_expression(cc3_t *self)
 {
     tk_t *tk = next(self);
@@ -1749,8 +1752,14 @@ expr_t *primary_expression(cc3_t *self)
         expr = make_str_lit(tk->str.data);
         break;
     case TK_LPAREN:
-        expr = expression(self);
-        want(self, TK_RPAREN);
+        if (maybe_want(self, TK_LCURLY)) {
+            stmt_t *body = read_block(self);
+            want(self, TK_RPAREN);
+            expr = make_stmt_expr(body);
+        } else {
+            expr = expression(self);
+            want(self, TK_RPAREN);
+        }
         break;
     default:
         err("Invalid primary expression %s", tk_str(tk));
@@ -1790,12 +1799,11 @@ expr_t *postfix_expression(cc3_t *self)
             continue;
         }
         if (maybe_want(self, TK_INCR)) {
-            // GNU extension nightmare
-            // ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 122, __func__); }));
+            ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 130, __func__); }));
             continue;
         }
         if (maybe_want(self, TK_DECR)) {
-            // ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 126, __func__); }));
+            ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 134, __func__); }));
             continue;
         }
         return expr;
@@ -2054,6 +2062,13 @@ static memb_t *member_list(cc3_t *self)
             } while (maybe_want(self, TK_COMMA));
             want(self, TK_SEMICOLON);
         } else {
+            if (base_ty->kind != TY_TAG
+                    || (base_ty->tag->kind != TAG_STRUCT
+                        && base_ty->tag->kind != TAG_UNION)
+                    || !base_ty->tag->defined)
+                err("Invalid anonymous member");
+            *tail = make_memb(clone_ty(base_ty), ((void *)0));
+            tail = &(*tail)->next;
         }
         free_ty(base_ty);
     } while (!maybe_want(self, TK_RCURLY));
@@ -2136,7 +2151,7 @@ enum {
 };
 static ty_t *decode_ts(int ts[static NUM_TS])
 {
-    /*static const struct {
+    static const struct {
         int ts[NUM_TS];
         int kind;
     } maps[] = {
@@ -2174,7 +2189,7 @@ static ty_t *decode_ts(int ts[static NUM_TS])
     };
     for (int i = 0; i < sizeof maps / sizeof *maps; ++i)
         if (memcmp(ts, maps[i].ts, sizeof maps[i].ts) == 0)
-            return make_ty(maps[i].kind);*/
+            return make_ty(maps[i].kind);
     err("Provided type specifiers do not name a valid type");
 }
 ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
@@ -2370,7 +2385,7 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
                     char *name;
                     *tail = make_param(declarator(self, *tail, 1, &name));
                     if (name)
-                        sema_declare(&self->sema, sc, clone_ty(*tail), name);
+                        (*tail)->sym = sema_declare(&self->sema, sc, clone_ty(*tail), name);
                     if (!maybe_want(self, TK_COMMA))
                         break;
                     if (maybe_want(self, TK_ELLIPSIS)) {
@@ -2382,8 +2397,7 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
                 want(self, TK_RPAREN);
             }
             ty = make_function(ty, param_tys, var);
-            // FIXME: gnu anonymous union hell
-            // ty->function.scope = sema_pop(&self->sema);
+            ty->function.scope = sema_pop(&self->sema);
             continue;
         }
         return ty;
@@ -2456,7 +2470,7 @@ static _Bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
                     stmt->arg1 = expr;
                     append_stmt(tail, stmt);
                 } else {
-                    // ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 1052, __func__); }));
+                    ((void) sizeof ((0) ? 1 : 0), ({ if (0) ; else __assert_fail ("0", "parse.c", 1067, __func__); }));
                 }
             }
         } while (maybe_want(self, TK_COMMA));
@@ -2571,7 +2585,7 @@ void statement(cc3_t *self, stmt_t ***tail)
     }
     if (maybe_want(self, TK_GOTO)) {
         stmt_t *stmt = make_stmt(STMT_GOTO);
-        want(self, TK_IDENTIFIER);
+        stmt->label = strdup(tk_str(want(self, TK_IDENTIFIER)));
         want(self, TK_SEMICOLON);
         append_stmt(tail, stmt);
         return;
@@ -2602,7 +2616,7 @@ void statement(cc3_t *self, stmt_t ***tail)
         append_stmt(tail, stmt);
     }
 }
-static inline stmt_t *read_block(cc3_t *self)
+static stmt_t *read_block(cc3_t *self)
 {
     stmt_t *head = ((void *)0), **tail = &head;
     block_item_list(self, &tail);
@@ -2621,11 +2635,19 @@ void parse(cc3_t *self)
                 if (ty->kind != TY_FUNCTION)
                     err("Function body after non-function declaration");
                 sym->had_def = 1;
+                self->sema.func_name = sym->name;
                 self->sema.offset = 0;
-                // FIXME: gnu anonymous union hell
-                // sema_push(&self->sema, ty->function.scope);
+                for (ty_t *param = sym->ty->function.param_tys; param; param = param->next) {
+                    if (!param->sym)
+                        err("Unnamed parameters are not allowed in function definitions");
+                    self->sema.offset = align(self->sema.offset, ty_align(param));
+                    param->sym->offset = self->sema.offset;
+                    self->sema.offset += ty_size(param);
+                }
+                sema_push(&self->sema, ty->function.scope);
                 stmt_t *body = read_block(self);
                 sema_exit(&self->sema);
+                gen_func(&self->gen, sym, self->sema.offset, body);
                 free_ty(base_ty);
                 continue;
             }

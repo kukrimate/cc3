@@ -59,6 +59,8 @@ static expr_t *assignment_expression(cc3_t *self);
 static expr_t *expression(cc3_t *self);
 static int constant_expression(cc3_t *self);
 
+static stmt_t *read_block(cc3_t *self);
+
 expr_t *primary_expression(cc3_t *self)
 {
     tk_t *tk = next(self);
@@ -75,8 +77,14 @@ expr_t *primary_expression(cc3_t *self)
         expr = make_str_lit(tk->str.data);
         break;
     case TK_LPAREN:
-        expr = expression(self);
-        want(self, TK_RPAREN);
+        if (maybe_want(self, TK_LCURLY)) {  // [GNU]: statement expressions
+            stmt_t *body = read_block(self);
+            want(self, TK_RPAREN);
+            expr = make_stmt_expr(body);
+        } else {
+            expr = expression(self);
+            want(self, TK_RPAREN);
+        }
         break;
     default:
         err("Invalid primary expression %s", tk_str(tk));
@@ -930,7 +938,7 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
                     *tail = make_param(declarator(self, *tail, true, &name));
 
                     if (name)
-                        sema_declare(&self->sema, sc, clone_ty(*tail), name);
+                        (*tail)->sym = sema_declare(&self->sema, sc, clone_ty(*tail), name);
 
                     // If there is no comma the end was reached
                     if (!maybe_want(self, TK_COMMA))
@@ -1227,7 +1235,7 @@ void statement(cc3_t *self, stmt_t ***tail)
     // Jumps
     if (maybe_want(self, TK_GOTO)) {
         stmt_t *stmt = make_stmt(STMT_GOTO);
-        want(self, TK_IDENTIFIER);
+        stmt->label = strdup(tk_str(want(self, TK_IDENTIFIER)));
         want(self, TK_SEMICOLON);
         append_stmt(tail, stmt);
         return;
@@ -1264,7 +1272,7 @@ void statement(cc3_t *self, stmt_t ***tail)
     }
 }
 
-static inline stmt_t *read_block(cc3_t *self)
+static stmt_t *read_block(cc3_t *self)
 {
     stmt_t *head = NULL, **tail = &head;
     block_item_list(self, &tail);
@@ -1284,6 +1292,7 @@ void parse(cc3_t *self)
 
             // Trigger semantic action
             sym_t *sym = sema_declare(&self->sema, sc, ty, name);
+            assert(sym->ty == ty);  // This was an awful bug!!
 
             // Check for function definition
             if (maybe_want(self, TK_LCURLY)) {
@@ -1296,9 +1305,20 @@ void parse(cc3_t *self)
 
                 // HACK!: zero sema's picture of the frame size before
                 // entering the context of a new function
+                self->sema.func_name = sym->name;
                 self->sema.offset = 0;
 
-                // Re-enter its prototype's scope before parsing the body
+                // Now we can allocate space in the stack frame for the
+                // parameters of the current function
+                for (ty_t *param = ty->function.param_tys; param; param = param->next) {
+                    if (!param->sym)
+                        err("Unnamed parameters are not allowed in function definitions");
+                    self->sema.offset = align(self->sema.offset, ty_align(param));
+                    param->sym->offset = self->sema.offset;
+                    self->sema.offset += ty_size(param);
+                }
+                // And then bring the parameters back into scope for parsing
+                // the function body
                 sema_push(&self->sema, ty->function.scope);
                 // Parse the body
                 stmt_t *body = read_block(self);

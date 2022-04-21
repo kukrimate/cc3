@@ -250,9 +250,11 @@ enum {
 };
 
 typedef struct scope scope_t;
+typedef struct sym sym_t;
 
 struct ty {
     ty_t *next;
+    sym_t *sym; // Corresponding symbol (if a parameter)
 
     int kind;
 
@@ -303,8 +305,6 @@ enum {
     SYM_ENUM_CONST,
 };
 
-typedef struct sym sym_t;
-
 struct sym {
     sym_t *next;
 
@@ -331,6 +331,9 @@ typedef struct sema sema_t;
 
 struct sema {
     scope_t *scope;
+
+    // HACK: current function specific stuff
+    const char *func_name;
     int offset;
 };
 
@@ -360,10 +363,8 @@ tag_t *sema_define_tag(sema_t *self, int kind, const char *name);
 /** Expressions **/
 
 enum {
-    // Global variable
-    EXPR_GLOBAL,
-    // Local variable
-    EXPR_LOCAL,
+    // Symbol
+    EXPR_SYM,
     // Constant
     EXPR_CONST,
     // String literal
@@ -405,9 +406,12 @@ enum {
     EXPR_SEQ,   // Comma operator
 
     EXPR_INIT,  // Initializer list
+
+    EXPR_STMT,  // [GNU] Statement expression
 };
 
 typedef struct expr expr_t;
+typedef struct stmt stmt_t;
 
 struct expr {
     expr_t *next;
@@ -419,16 +423,20 @@ struct expr {
 
     // Value
     int offset;
+    sym_t *sym;
     char *str;
     val_t val;
 
     // Arguments
     expr_t *arg1, *arg2, *arg3;
+    // Body of a statement expression
+    stmt_t *body;
 };
 
 expr_t *make_sym(sema_t *self, const char *name);
 expr_t *make_const(ty_t *ty, val_t val);
 expr_t *make_str_lit(const char *str);
+expr_t *make_stmt_expr(stmt_t *body);
 
 expr_t *make_unary(int kind, expr_t *arg1);
 expr_t *make_memb_expr(expr_t *arg1, const char *name);
@@ -453,8 +461,6 @@ enum {
     STMT_INIT,
     STMT_EVAL,
 };
-
-typedef struct stmt stmt_t;
 
 struct stmt {
     stmt_t *next;

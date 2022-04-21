@@ -282,7 +282,9 @@ static void print_ty_r(ty_t *ty)
         ty_t *param_ty = ty->function.param_tys;
         while (param_ty) {
             print_ty_r(param_ty);
-            if ((param_ty = param_ty->next) || ty->function.var)
+            param_ty = param_ty->next;  // NOTE: investigate why inline-ing
+                                        // the assignment below crashes
+            if (param_ty || ty->function.var)
                 printf(", ");
         }
         if (ty->function.var)
@@ -390,6 +392,11 @@ void sema_init(sema_t *self)
 {
     self->scope = NULL;
     sema_enter(self);
+
+    // FIXME: declare the real type of this
+    sema_declare(self, TK_TYPEDEF,
+        make_pointer(make_ty(TY_VOID)),
+        strdup("__builtin_va_list"));
 }
 
 void sema_free(sema_t *self)
@@ -426,14 +433,14 @@ void sema_exit(sema_t *self)
     self->scope = scope->parent;
 
     // Free symbols
-    for (sym_t *sym = scope->syms; sym; ) {
-        sym_t *tmp = sym->next;
-        if (sym->kind != SYM_ENUM_CONST)
-            free_ty(sym->ty);
-        free(sym->name);
-        free(sym);
-        sym = tmp;
-    }
+    // for (sym_t *sym = scope->syms; sym; ) {
+    //     sym_t *tmp = sym->next;
+    //     if (sym->kind != SYM_ENUM_CONST)
+    //         free_ty(sym->ty);
+    //     free(sym->name);
+    //     free(sym);
+    //     sym = tmp;
+    // }
 
     // FIXME: Free tags, use refcounting
     // We cannot actually do this for now, because we will get use
@@ -512,8 +519,12 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
             err("Invalid re-declaration of %s", name);
         }
 
-        // FIXME: check re-declaration type
         printf("Re-declaration of %s\n", name); // Debug
+
+        // FIXME: check re-declaration type
+        // NOTE: This assignment is needed for function defs
+        sym->ty = ty;
+
         return sym;
     }
 
@@ -656,9 +667,12 @@ static expr_t *make_expr(int kind)
 
 expr_t *make_sym(sema_t *self, const char *name)
 {
-    sym_t *sym = sema_lookup(self, name);
+    // Special pre-declared identifier
+    if (self->func_name && !strcmp(name, "__func__"))
+        return make_str_lit(self->func_name);
 
     // Find symbol
+    sym_t *sym = sema_lookup(self, name);
     if (!sym)
         err("Undeclared identifier %s", name);
 
@@ -670,14 +684,10 @@ expr_t *make_sym(sema_t *self, const char *name)
         err("Invalid use of typedef name %s", name);
     case SYM_EXTERN:
     case SYM_STATIC:
-        expr = make_expr(EXPR_GLOBAL);
-        expr->ty = clone_ty(sym->ty);
-        expr->str = strdup(name);
-        break;
     case SYM_LOCAL:
-        expr = make_expr(EXPR_LOCAL);
+        expr = make_expr(EXPR_SYM);
         expr->ty = clone_ty(sym->ty);
-        expr->offset = sym->offset;
+        expr->sym = sym;
         break;
     case SYM_ENUM_CONST:
         expr = make_const(make_ty(TY_INT), sym->val);
@@ -700,6 +710,23 @@ expr_t *make_str_lit(const char *str)
     expr_t *expr = make_expr(EXPR_STR_LIT);
     expr->ty = make_array(make_ty(TY_CHAR), strlen(str) + 1);
     expr->str = strdup(str);
+    return expr;
+}
+
+expr_t *make_stmt_expr(stmt_t *body)
+{
+    expr_t *expr = make_expr(EXPR_STMT);
+
+    // Get the type of the last eval (or void)
+    stmt_t *last = body;
+    while (last->next)
+        last = last->next;
+    if (last && last->kind == STMT_EVAL)
+        expr->ty = clone_ty(last->arg1->ty);
+    else
+        expr->ty = make_ty(TY_VOID);
+
+    expr->body = body;
     return expr;
 }
 
@@ -825,18 +852,34 @@ expr_t *make_unary(int kind, expr_t *arg1)
             err("Pointer type required");
         break;
     case EXPR_POS:
+        if (arg1->kind == EXPR_CONST) {
+            arg1->val = arg1->val;
+            return arg1;
+        }
         if (!is_arith_ty((ty = arg1->ty)))
             err("Arihmetic type required");
         return arg1;
     case EXPR_NEG:
+        if (arg1->kind == EXPR_CONST) {
+            arg1->val = -arg1->val;
+            return arg1;
+        }
         if (!is_arith_ty((ty = arg1->ty)))
             err("Arihmetic type required");
         break;
     case EXPR_NOT:
+        if (arg1->kind == EXPR_CONST) {
+            arg1->val = ~arg1->val;
+            return arg1;
+        }
         if (!is_integer_ty((ty = arg1->ty)))
             err("Integer type required");
         break;
     case EXPR_LNOT:
+        if (arg1->kind == EXPR_CONST) {
+            arg1->val = !arg1->val;
+            return arg1;
+        }
         if (!is_scalar_ty((ty = arg1->ty)))
         ty = make_ty(TY_INT);
         break;
@@ -853,35 +896,36 @@ expr_t *make_unary(int kind, expr_t *arg1)
     return expr;
 }
 
-static memb_t *find_memb(ty_t *ty, const char *name)
+static int find_memb(ty_t *ty, const char *name, ty_t **out)
 {
     if (ty->kind != TY_TAG
             || (ty->tag->kind != TAG_STRUCT && ty->tag->kind != TAG_UNION)
             || !ty->tag->defined)
-        return NULL;
+        return -1;
 
     for (memb_t *memb = ty->tag->members; memb; memb = memb->next) {
         if (!memb->name) {
-            memb_t *result = find_memb(memb->ty, name);
-            if (result)
-                return result;
+            int result = find_memb(memb->ty, name, out);
+            if (result != -1) {
+                return memb->offset + result;
+            }
         } else if (!strcmp(memb->name, name)) {
-            return memb;
+            *out = clone_ty(memb->ty);
+            return memb->offset;
         }
     }
 
-    return NULL;
+    return -1;
 }
 
 expr_t *make_memb_expr(expr_t *arg1, const char *name)
 {
     expr_t *expr = make_expr(EXPR_MEMB);
     expr->arg1 = arg1;
-    memb_t *memb = find_memb(arg1->ty, name);
-    if (!memb)
+
+    expr->offset = find_memb(arg1->ty, name, &expr->ty);
+    if (expr->offset == -1)
         err("Failed to access member %s", name);
-    expr->ty = clone_ty(memb->ty);
-    expr->offset = memb->offset;
     return expr;
 }
 
@@ -999,6 +1043,10 @@ expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
     expr_t *expr = make_expr(kind);
     assert(kind == EXPR_COND);
     expr->ty = arg2->ty;
+
+    if (arg1->kind == EXPR_CONST)
+        return arg1->val ? arg2 : arg3;
+
     expr->arg1 = arg1;
     expr->arg2 = arg2;
     expr->arg3 = arg3;
