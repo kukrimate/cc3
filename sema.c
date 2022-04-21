@@ -1,74 +1,5 @@
 #include "cc3.h"
 
-int ty_align(ty_t *ty)
-{
-    switch (ty->kind) {
-    case TY_CHAR:       return 1;
-    case TY_SCHAR:      return 1;
-    case TY_UCHAR:      return 1;
-    case TY_SHORT:      return 2;
-    case TY_USHORT:     return 2;
-    case TY_INT:        return 4;
-    case TY_UINT:       return 4;
-    case TY_LONG:       return 8;
-    case TY_ULONG:      return 8;
-    case TY_LLONG:      return 8;
-    case TY_ULLONG:     return 8;
-    case TY_FLOAT:      return 4;
-    case TY_DOUBLE:     return 8;
-    case TY_LDOUBLE:    return 16;
-    case TY_BOOL:       return 1;
-
-    case TY_UNION:
-    case TY_STRUCT:
-        return ty->stru.align;
-
-    case TY_POINTER:
-        return 8;
-
-    case TY_ARRAY:
-        return ty_align(ty->array.elem_ty);
-
-    default:
-        ASSERT_NOT_REACHED();
-    }
-}
-
-int ty_size(ty_t *ty)
-{
-    switch (ty->kind) {
-    case TY_CHAR:       return 1;
-    case TY_SCHAR:      return 1;
-    case TY_UCHAR:      return 1;
-    case TY_SHORT:      return 2;
-    case TY_USHORT:     return 2;
-    case TY_INT:        return 4;
-    case TY_UINT:       return 4;
-    case TY_LONG:       return 8;
-    case TY_ULONG:      return 8;
-    case TY_LLONG:      return 8;
-    case TY_ULLONG:     return 8;
-    case TY_FLOAT:      return 4;
-    case TY_DOUBLE:     return 8;
-    case TY_LDOUBLE:    return 16;
-    case TY_BOOL:       return 1;
-
-    case TY_UNION:
-    case TY_STRUCT:
-        return ty->stru.size;
-
-    case TY_POINTER:
-        return 8;
-
-    case TY_ARRAY:
-        assert(ty->array.cnt != -1);
-        return ty_size(ty->array.elem_ty) * ty->array.cnt;
-
-    default:
-        ASSERT_NOT_REACHED();
-    }
-}
-
 memb_t *make_memb(ty_t *ty, char *name)
 {
     memb_t *memb = calloc(1, sizeof *memb);
@@ -76,6 +7,46 @@ memb_t *make_memb(ty_t *ty, char *name)
     memb->ty = ty;
     memb->name = name;
     return memb;
+}
+
+memb_t *pack_struct(memb_t *members, int *out_align, int *out_size)
+{
+    for (memb_t *memb = members; memb; memb = memb->next) {
+        int memb_align = ty_align(memb->ty);
+        // The highest member alignment becomes the struct's alignment
+        if (memb_align > *out_align)
+            *out_align = memb_align;
+        // Then we align the current size to the member's alignment
+        // and that becomes the member's offset
+        *out_size = align(*out_size, memb_align);
+        memb->offset = *out_size;
+        // Finally we increase the size by the member's size
+        *out_size += ty_size(memb->ty);
+    }
+
+    // And then the whole struct's size must be aligned to be a multiple
+    // of it's own alignment
+    *out_size = align(*out_size, *out_align);
+
+    return members;
+}
+
+memb_t *pack_union(memb_t *members, int *out_align, int *out_size)
+{
+    for (memb_t *memb = members; memb; memb = memb->next) {
+        int memb_align = ty_align(memb->ty);
+        int memb_size = ty_size(memb->ty);
+
+        // The highest member alignment becomes the union's alignment
+        if (memb_align > *out_align)
+            *out_align = memb_align;
+
+        // The highest member size becomes the union's size
+        if (memb_size > *out_size)
+            *out_size = memb_size;
+    }
+
+    return members;
 }
 
 ty_t *make_ty(int kind)
@@ -86,44 +57,10 @@ ty_t *make_ty(int kind)
     return ty;
 }
 
-ty_t *make_struct(int kind, memb_t *members)
+ty_t *make_ty_tag(tag_t *tag)
 {
-    ty_t *ty = make_ty(kind);
-    ty->stru.members = members;
-    switch (kind) {
-    case TY_STRUCT:
-        for (memb_t *memb = members; memb; memb = memb->next) {
-            int memb_align = ty_align(memb->ty);
-            int memb_size = ty_size(memb->ty);
-            // The highest member alignment becomes the struct's alignment
-            if (memb_align > ty->stru.align)
-                ty->stru.align = memb_align;
-            // Then we align the current size to the member's alignment
-            // and that becomes the member's offset
-            ty->stru.size = align(ty->stru.size, memb_align);
-            memb->offset = ty->stru.size;
-            // Finally we increase the size by the member's size
-            ty->stru.size += memb_size;
-        }
-        // And then the whole struct's size must be aligned to be a multiple
-        // of it's own alignment
-        ty->stru.size = align(ty->stru.size, ty->stru.align);
-        break;
-    case TY_UNION:
-        for (memb_t *memb = members; memb; memb = memb->next) {
-            int memb_align = ty_align(memb->ty);
-            int memb_size = ty_size(memb->ty);
-            // The highest member alignment becomes the union's alignment
-            if (memb_align > ty->stru.align)
-                ty->stru.align = memb_align;
-            // The highest member size becomes the union's size
-            if (memb_size > ty->stru.size)
-                ty->stru.size = memb_size;
-        }
-        break;
-    default:
-        ASSERT_NOT_REACHED();
-    }
+    ty_t *ty = make_ty(TY_TAG);
+    ty->tag = tag;
     return ty;
 }
 
@@ -193,22 +130,8 @@ ty_t *clone_ty(ty_t *ty)
     case TY_BOOL:
         return make_ty(ty->kind);
 
-    case TY_UNION:
-    case TY_STRUCT:
-    {
-        memb_t *members = NULL, **tail = &members;
-        for (memb_t *memb = ty->stru.members; memb; memb = memb->next) {
-            *tail = make_memb(clone_ty(memb->ty),
-                memb->name ? strdup(memb->name) : NULL);
-            (*tail)->offset = memb->offset;
-            tail = &(*tail)->next;
-        }
-        ty_t *new_ty = make_ty(ty->kind);
-        new_ty->stru.align = ty->stru.align;
-        new_ty->stru.size = ty->stru.size;
-        new_ty->stru.members = members;
-        return new_ty;
-    }
+    case TY_TAG:
+        return make_ty_tag(ty->tag);
 
     case TY_POINTER:
         return make_pointer(clone_ty(ty->pointer.base_ty));
@@ -250,18 +173,7 @@ void free_ty(ty_t *ty)
     case TY_DOUBLE:
     case TY_LDOUBLE:
     case TY_BOOL:
-        break;
-
-    case TY_UNION:
-    case TY_STRUCT:
-        for (memb_t *memb = ty->stru.members; memb;) {
-            memb_t *tmp = memb->next;
-            free_ty(memb->ty);
-            if (memb->name)
-                free(memb->name);
-            free(memb);
-            memb = tmp;
-        }
+    case TY_TAG:
         break;
 
     case TY_POINTER:
@@ -288,6 +200,20 @@ void free_ty(ty_t *ty)
     free(ty);
 }
 
+static void print_ty_r(ty_t *ty);
+
+static void print_members(memb_t *members)
+{
+    printf(" { ");
+    for (memb_t *memb = members; memb; memb = memb->next) {
+        print_ty_r(memb->ty);
+        if (memb->name)
+            printf(" %s", memb->name);
+        printf("; ");
+    }
+    printf("}");
+}
+
 static void print_ty_r(ty_t *ty)
 {
     switch (ty->kind) {
@@ -308,19 +234,31 @@ static void print_ty_r(ty_t *ty)
     case TY_LDOUBLE:    printf("long double");          break;
     case TY_BOOL:       printf("_Bool");                break;
 
-    case TY_UNION:
-        printf("union { ");
-        goto ty_struct;
-    case TY_STRUCT:
-        printf("struct { ");
-    ty_struct:
-        for (memb_t *memb = ty->stru.members; memb; memb = memb->next) {
-            print_ty_r(memb->ty);
-            if (memb->name)
-                printf(" %s", memb->name);
-            printf("; ");
+    case TY_TAG:
+        switch (ty->tag->kind) {
+        case TAG_STRUCT:
+            if (ty->tag->name)
+                printf("struct %s", ty->tag->name);
+            else
+                printf("struct");
+            if (ty->tag->defined)
+                print_members(ty->tag->members);
+            break;
+        case TAG_UNION:
+            if (ty->tag->name)
+                printf("union %s", ty->tag->name);
+            else
+                printf("union");
+            if (ty->tag->defined)
+                print_members(ty->tag->members);
+            break;
+        case TAG_ENUM:
+            if (ty->tag->name)
+                printf("enum %s", ty->tag->name);
+            else
+                printf("enum");
+            break;
         }
-        printf("}");
         break;
 
     case TY_POINTER:
@@ -362,6 +300,91 @@ void print_ty(ty_t *ty)
     printf("\n");
 }
 
+int ty_align(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:       return 1;
+    case TY_SCHAR:      return 1;
+    case TY_UCHAR:      return 1;
+    case TY_SHORT:      return 2;
+    case TY_USHORT:     return 2;
+    case TY_INT:        return 4;
+    case TY_UINT:       return 4;
+    case TY_LONG:       return 8;
+    case TY_ULONG:      return 8;
+    case TY_LLONG:      return 8;
+    case TY_ULLONG:     return 8;
+    case TY_FLOAT:      return 4;
+    case TY_DOUBLE:     return 8;
+    case TY_LDOUBLE:    return 16;
+    case TY_BOOL:       return 1;
+
+    case TY_TAG:
+        assert(ty->tag->defined);
+        switch (ty->tag->kind) {
+        case TAG_STRUCT:
+        case TAG_UNION:
+            return ty->tag->align;
+        case TAG_ENUM:
+            return 4;
+        default:
+            ASSERT_NOT_REACHED();
+        }
+
+    case TY_POINTER:
+        return 8;
+
+    case TY_ARRAY:
+        return ty_align(ty->array.elem_ty);
+
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+int ty_size(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:       return 1;
+    case TY_SCHAR:      return 1;
+    case TY_UCHAR:      return 1;
+    case TY_SHORT:      return 2;
+    case TY_USHORT:     return 2;
+    case TY_INT:        return 4;
+    case TY_UINT:       return 4;
+    case TY_LONG:       return 8;
+    case TY_ULONG:      return 8;
+    case TY_LLONG:      return 8;
+    case TY_ULLONG:     return 8;
+    case TY_FLOAT:      return 4;
+    case TY_DOUBLE:     return 8;
+    case TY_LDOUBLE:    return 16;
+    case TY_BOOL:       return 1;
+
+    case TY_TAG:
+        assert(ty->tag->defined);
+        switch (ty->tag->kind) {
+        case TAG_STRUCT:
+        case TAG_UNION:
+            return ty->tag->size;
+        case TAG_ENUM:
+            return 4;
+        default:
+            ASSERT_NOT_REACHED();
+        }
+
+    case TY_POINTER:
+        return 8;
+
+    case TY_ARRAY:
+        assert(ty->array.cnt != -1);
+        return ty_size(ty->array.elem_ty) * ty->array.cnt;
+
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
 void sema_init(sema_t *self)
 {
     self->scope = NULL;
@@ -383,6 +406,18 @@ void sema_enter(sema_t *self)
     self->scope = scope;
 }
 
+static void free_members(memb_t *members)
+{
+    for (memb_t *memb = members; memb;) {
+        memb_t *tmp = memb->next;
+        free_ty(memb->ty);
+        if (memb->name)
+            free(memb->name);
+        free(memb);
+        memb = tmp;
+    }
+}
+
 void sema_exit(sema_t *self)
 {
     // Replace current scope with parent
@@ -401,8 +436,9 @@ void sema_exit(sema_t *self)
     // Free tags
     for (tag_t *tag = scope->tags; tag; ) {
         tag_t *tmp = tag->next;
-        free_ty(tag->ty);
         free(tag->name);
+        if (tag->members)
+            free_members(tag->members);
         free(tag);
         tag = tmp;
     }
@@ -430,10 +466,6 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
         self->scope->syms = sym;
     }
 
-    // Names cannot be declared as void
-    if (ty->kind == TY_VOID)
-        err("Tried to declare %s with type void", name);
-
     // Figure out symbol type from storage class
     switch (sc) {
     case TK_TYPEDEF:
@@ -458,6 +490,10 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     default:
         ASSERT_NOT_REACHED();
     }
+
+    // Variables cannot be declared as void
+    if (sym->kind != SYM_TYPEDEF && ty->kind == TY_VOID)
+        err("Tried to declare %s with type void", name);
 
     sym->ty = ty;
     sym->name = name;
@@ -497,38 +533,61 @@ ty_t *sema_findtypedef(sema_t *self, const char *name)
     return NULL;
 }
 
-static tag_t *lookup_tag(sema_t *self, const char *name)
+static tag_t *create_tag(sema_t *self, int kind, const char *name)
 {
-    for (scope_t *scope = self->scope; scope; scope = scope->parent)
-        for (tag_t *tag = scope->tags; tag; tag = tag->next)
-            if (!strcmp(tag->name, name))
-                return tag;
-    return NULL;
-}
-
-ty_t *sema_forward_declare_tag(sema_t *self, const char *name)
-{
-    // If there is an existing tag found, return its type
-    tag_t *tag = lookup_tag(self, name);
-    if (tag)
-        return clone_ty(tag->ty);
-    // Otherwise forward references behave like void
-    return make_ty(TY_VOID);
-}
-
-ty_t *sema_declare_tag(sema_t *self, ty_t *ty, const char *name)
-{
-    // If there is an existing tag found, throw a re-definition error
-    tag_t *tag = lookup_tag(self, name);
-    if (tag)
-        err("Re-definition of tag %s", name);
-    // Otherwise create tag in the current scope
-    tag = calloc(1, sizeof *tag);
-    tag->ty = clone_ty(ty);
-    tag->name = strdup(name);
+    tag_t *tag = calloc(1, sizeof *tag);
+    if (!tag) abort();
     tag->next = self->scope->tags;
     self->scope->tags = tag;
-    return ty;
+    tag->kind = kind;
+    tag->name = name ? strdup(name) : NULL;
+    return tag;
+}
+
+tag_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
+{
+    // Look for tags in any scope
+    tag_t *tag;
+    for (scope_t *scope = self->scope; scope; scope = scope->parent)
+        for (tag = scope->tags; tag; tag = tag->next)
+            if (tag->name && !strcmp(tag->name, name))
+                goto found;
+found:
+
+    if (tag) {
+        // If there was forward declaration or definition in any scope, use that
+        if (tag->kind != kind)
+            err("Tag referred to with the wrong keyword");
+    } else {
+        // Create the in the tag current scope
+        return create_tag(self, kind, name);
+    }
+
+    return tag;
+}
+
+tag_t *sema_define_tag(sema_t *self, int kind, const char *name)
+{
+    // Look for tags just in the current scope
+    tag_t *tag;
+    for (tag = self->scope->tags; tag; tag = tag->next)
+        if (tag->name && !strcmp(tag->name, name))
+            break;
+
+    if (tag) {
+        // If there was a forward declaration in the current scope, use that
+        if (tag->kind != kind)
+            err("Tag referred to with the wrong keyword");
+        if (tag->defined)
+            err("Re-definition of tag %s", name);
+    } else {
+        // Otherwise, create the tag in the current scope
+        tag = create_tag(self, kind, name);
+    }
+
+    // In either case the tag will now become a defined
+    tag->defined = true;
+    return tag;
 }
 
 static expr_t *make_expr(int kind)
@@ -593,11 +652,11 @@ static bool is_integer_ty(ty_t *ty)
     case TY_ULLONG:
     case TY_BOOL:
         return true;
+    case TY_TAG:
+        return ty->tag->kind == TAG_ENUM && ty->tag->defined;
     case TY_FLOAT:
     case TY_DOUBLE:
     case TY_LDOUBLE:
-    case TY_UNION:
-    case TY_STRUCT:
     case TY_POINTER:
     case TY_ARRAY:
     case TY_FUNCTION:
@@ -627,8 +686,8 @@ static bool is_arith_ty(ty_t *ty)
     case TY_DOUBLE:
     case TY_LDOUBLE:
         return true;
-    case TY_UNION:
-    case TY_STRUCT:
+    case TY_TAG:
+        return ty->tag->kind == TAG_ENUM && ty->tag->defined;
     case TY_POINTER:
     case TY_ARRAY:
     case TY_FUNCTION:
@@ -663,10 +722,9 @@ static bool is_scalar_ty(ty_t *ty)
     case TY_ARRAY:
     case TY_FUNCTION:
         return true;
-    // Non-scalar types
-    case TY_UNION:
-    case TY_STRUCT:
-        return false;
+    // Might be non-scalar
+    case TY_TAG:
+        return ty->tag->kind == TAG_ENUM && ty->tag->defined;
     default:
         ASSERT_NOT_REACHED();
     }
@@ -732,17 +790,25 @@ expr_t *make_memb_expr(expr_t *arg1, const char *name)
     expr_t *expr = make_expr(EXPR_MEMB);
     expr->arg1 = arg1;
 
-    if (arg1->ty->kind != TY_STRUCT && arg1->ty->kind != TY_UNION)
-        err("Member access on non-aggregate type");
+    if (arg1->ty->kind != TY_TAG)
+        goto err;
 
-    for (memb_t *memb = arg1->ty->stru.members; memb; memb = memb->next)
+    tag_t *tag = arg1->ty->tag;
+    if (tag->kind != TAG_STRUCT && tag->kind != TAG_UNION)
+        goto err;
+    if (!tag->defined)
+        goto err;
+
+    for (memb_t *memb = tag->members; memb; memb = memb->next)
         if (!strcmp(memb->name, name)) {
             expr->ty = clone_ty(memb->ty);
             expr->offset = memb->offset;
             return expr;
         }
 
-    err("Access of non-existent aggregate member");
+err:
+    print_ty_r(arg1->ty);
+    err(" has no member %s\n", name);
 }
 
 expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)

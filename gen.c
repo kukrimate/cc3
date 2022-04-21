@@ -380,12 +380,46 @@ void gen_bool(gen_t *self, expr_t *expr, bool val, int label)
     }
 }
 
+static void gen_init_value(gen_t *self, expr_t *expr)
+{
+    // Either the value itself or zero
+    if (expr)
+        gen_value(self, expr);
+    else
+        emit_code(self, "xor rax, rax\n");
+}
+
 static void gen_initializer(gen_t *self, ty_t *ty, int offset, expr_t *expr)
 {
-    // Decompose aggregate initializer
     switch (ty->kind) {
-    case TY_STRUCT:
-        {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_BOOL:
+        gen_init_value(self, expr);
+        emit_code(self, "mov byte [rbp - %d], al\n", self->offset - offset);
+        break;
+    case TY_SHORT:
+    case TY_USHORT:
+        gen_init_value(self, expr);
+        emit_code(self, "mov word [rbp - %d], ax\n", self->offset - offset);
+        break;
+    case TY_INT:
+    case TY_UINT:
+        gen_init_value(self, expr);
+        emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
+        break;
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_POINTER:
+        gen_init_value(self, expr);
+        emit_code(self, "mov qword [rbp - %d], rax\n", self->offset - offset);
+        break;
+    case TY_TAG:
+        switch (ty->tag->kind) {
+        case TAG_STRUCT:
             if (expr) {
                 if (expr->kind != EXPR_INIT)
                     err("Expected initializer list");
@@ -393,7 +427,7 @@ static void gen_initializer(gen_t *self, ty_t *ty, int offset, expr_t *expr)
             }
 
             // Struct initializers can initialize all entries
-            for (memb_t *memb = ty->stru.members; memb; memb = memb->next) {
+            for (memb_t *memb = ty->tag->members; memb; memb = memb->next) {
                 gen_initializer(self, memb->ty, offset + memb->offset, expr);
                 if (expr)
                     expr = expr->next;
@@ -403,10 +437,9 @@ static void gen_initializer(gen_t *self, ty_t *ty, int offset, expr_t *expr)
             if (expr)
                 err("Trailing garbage in initializer list");
 
-            return;
-        }
-    case TY_UNION:
-        {
+            break;
+
+        case TAG_UNION:
             if (expr) {
                 if (expr->kind != EXPR_INIT)
                     err("Expected initializer list");
@@ -414,15 +447,24 @@ static void gen_initializer(gen_t *self, ty_t *ty, int offset, expr_t *expr)
             }
 
             // Union initializers can only initializer the first member
-            memb_t *memb = ty->stru.members;
+            memb_t *memb = ty->tag->members;
             gen_initializer(self, memb->ty, offset + memb->offset, expr->arg1);
 
             // Make sure the initializer list has no more elements
             if (expr->arg1->next)
                 err("Trailing garbage in initializer list");
 
-            return;
+            break;
+        case TAG_ENUM:
+            // Same as int
+            if (expr)
+                gen_value(self, expr);
+            else
+                emit_code(self, "xor rax, rax\n");
+            emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
+            break;
         }
+        break;
     case TY_ARRAY:
         {
             if (expr) {
@@ -447,38 +489,8 @@ static void gen_initializer(gen_t *self, ty_t *ty, int offset, expr_t *expr)
             if (expr)
                 err("Trailing garbage in initializer list");
             
-            return;
+            break;
         }
-    }
-
-    // Either store the value (or zero)
-    if (expr)
-        gen_value(self, expr);
-    else
-        emit_code(self, "xor rax, rax\n");
-
-    switch (ty->kind) {
-    case TY_CHAR:
-    case TY_SCHAR:
-    case TY_UCHAR:
-    case TY_BOOL:
-        emit_code(self, "mov byte [rbp - %d], al\n", self->offset - offset);
-        break;
-    case TY_SHORT:
-    case TY_USHORT:
-        emit_code(self, "mov word [rbp - %d], ax\n", self->offset - offset);
-        break;
-    case TY_INT:
-    case TY_UINT:
-        emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
-        break;
-    case TY_LONG:
-    case TY_ULONG:
-    case TY_LLONG:
-    case TY_ULLONG:
-    case TY_POINTER:
-        emit_code(self, "mov qword [rbp - %d], rax\n", self->offset - offset);
-        break;
     default:
         ASSERT_NOT_REACHED();
     }

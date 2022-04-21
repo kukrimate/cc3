@@ -245,7 +245,7 @@ retry:
         // Octal
         self->tk->val = 0;
         for (;; lex_eat(self))
-            switch (lex_peek(self, 0)) {
+            switch ((ch = lex_peek(self, 0))) {
             case '0' ... '7':
                 self->tk->val = (self->tk->val << 3) | (ch - '0');
                 break;
@@ -256,7 +256,7 @@ retry:
         // Decimal
         self->tk->val = ch - '0';
         for (;; lex_eat(self))
-            switch (lex_peek(self, 0)) {
+            switch ((ch = lex_peek(self, 0))) {
             case '0' ... '9':
                 self->tk->val = self->tk->val * 10 + ch - '0';
                 break;

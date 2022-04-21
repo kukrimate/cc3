@@ -8,6 +8,8 @@ extern void __assert_perror_fail (int __errnum, const char *__file,
 extern void __assert (const char *__assertion, const char *__file, int __line)
      ;
 
+typedef void *__builtin_va_list;
+
 typedef __builtin_va_list __gnuc_va_list;
 typedef __gnuc_va_list va_list;
 

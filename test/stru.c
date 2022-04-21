@@ -1,39 +1,26 @@
+int printf(const char *, ...);
+
+// Complete struct
 struct foo {
     int a;
-    long b;
+    short b;
 };
 
+// Indirectly complete a struct through a typedef
+typedef struct bar bar_t;
+
 struct bar {
-    _Bool a;
+    int a;
     int b;
 };
 
-union foobar {
-    float f;
-    double d;
-};
-
-enum baz {
-    ONE,
-    TWO
-};
-
-int printf(const char *, ...);
-
 int main(void)
 {
-    struct foo foo;
-    struct bar bar;
+    struct foo foo = { 0xdeadbeef, 0xf00d };
+    printf("foo.a = %x\n", foo.a);
+    printf("foo.b = %hx\n", foo.b);
 
-    foo.a = 1;
-    foo.b = 2;
-
-    printf("foo.a = %d\n", foo.a);
-    printf("foo.b = %d\n", foo.b);
-
-    bar.a = 1;
-    bar.b = 2;
-
+    bar_t bar = { 1, 65537 };
     printf("bar.a = %d\n", bar.a);
     printf("bar.b = %d\n", bar.b);
 }

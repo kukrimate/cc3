@@ -188,6 +188,44 @@ void lex_adv(lexer_t *self);
 
 /** Types **/
 
+typedef struct ty ty_t;
+typedef struct memb memb_t;
+
+struct memb {
+    memb_t *next;
+
+    ty_t *ty;
+    char *name;
+
+    int offset;
+};
+
+memb_t *make_memb(ty_t *ty, char *name);
+memb_t *pack_struct(memb_t *members, int *out_align, int *out_size);
+memb_t *pack_union(memb_t *members, int *out_align, int *out_size);
+
+enum {
+    TAG_STRUCT,
+    TAG_UNION,
+    TAG_ENUM,
+};
+
+typedef struct tag tag_t;
+
+struct tag {
+    tag_t *next;
+
+    int kind;
+
+    char *name;         // Name (can be NULL if untagged)
+    bool defined;       // Is this type actuall defined?
+
+
+    memb_t *members;    // Struct/union members
+    int align;          // Struct/union alignment
+    int size;           // Struct/union size
+};
+
 enum {
     TY_VOID,
     TY_CHAR,
@@ -205,26 +243,11 @@ enum {
     TY_DOUBLE,
     TY_LDOUBLE,
     TY_BOOL,
-    TY_STRUCT,
-    TY_UNION,
+    TY_TAG,
     TY_POINTER,
     TY_ARRAY,
     TY_FUNCTION,
 };
-
-typedef struct ty ty_t;
-typedef struct memb memb_t;
-
-struct memb {
-    memb_t *next;
-
-    ty_t *ty;
-    char *name;
-
-    int offset;
-};
-
-memb_t *make_memb(ty_t *ty, char *name);
 
 struct ty {
     ty_t *next;
@@ -232,11 +255,7 @@ struct ty {
     int kind;
 
     union {
-        struct {
-            int align;
-            int size;
-            memb_t *members;
-        } stru;
+        tag_t *tag;
 
         struct {
             ty_t *base_ty;
@@ -255,11 +274,8 @@ struct ty {
     };
 };
 
-int ty_align(ty_t *ty);
-int ty_size(ty_t *ty);
-
 ty_t *make_ty(int kind);
-ty_t *make_struct(int kind, memb_t *members);
+ty_t *make_ty_tag(tag_t *tag);
 ty_t *make_pointer(ty_t *base_ty);
 ty_t *make_array(ty_t *elem_ty, int cnt);
 ty_t *make_param(ty_t *ty);
@@ -269,6 +285,9 @@ ty_t *clone_ty(ty_t *ty);
 void free_ty(ty_t *ty);
 
 void print_ty(ty_t *ty);
+
+int ty_align(ty_t *ty);
+int ty_size(ty_t *ty);
 
 /** Symbol table **/
 
@@ -292,15 +311,6 @@ struct sym {
     bool had_def;
 
     int offset;
-};
-
-typedef struct tag tag_t;
-
-struct tag {
-    tag_t *next;
-
-    ty_t *ty;
-    char *name;
 };
 
 typedef struct scope scope_t;
@@ -333,10 +343,10 @@ sym_t *sema_lookup(sema_t *self, const char *name);
 ty_t *sema_findtypedef(sema_t *self, const char *name);
 
 // Forward declare a tag
-ty_t *sema_forward_declare_tag(sema_t *self, const char *name);
+tag_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name);
+// Define a tag
+tag_t *sema_define_tag(sema_t *self, int kind, const char *name);
 
-// Declare a tag with a type
-ty_t *sema_declare_tag(sema_t *self, ty_t *ty, const char *name);
 
 /** Expressions **/
 
