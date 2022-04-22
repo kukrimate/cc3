@@ -5,21 +5,73 @@ int align(int val, int bound)
     return (val + bound - 1) / bound * bound;
 }
 
-__attribute__((noreturn)) void err(const char *fmt, ...)
+static void vprintln(const char *fmt, va_list ap)
 {
-    // Print prefix
-    fputs("Error: ", stderr);
+    for (;;) {
+        char ch = *fmt++;
 
-    // Format error
+        if (!ch)        // End of string
+            break;
+
+        if (ch == '%')  // Format specifier
+            switch ((ch = *fmt++)) {
+            /** Proxy to printf **/
+
+            case '%':
+                putchar('%');
+                break;
+
+            case 's':   // C string
+                printf("%s", va_arg(ap, const char *));
+                break;
+
+            case 'd':   // Decimal
+                printf("%d", va_arg(ap, int));
+                break;
+
+            case 'x':   // Hex
+                printf("%x", va_arg(ap, int));
+                break;
+
+            /** Custom types **/
+
+            case 'S':   // string_t
+                printf("%s", va_arg(ap, string_t *)->data);
+                break;
+
+            case 't':   // tk_t
+                printf("%s", tk_str(va_arg(ap, tk_t *)));
+                break;
+
+            case 'T':   // ty_t
+                print_ty(va_arg(ap, ty_t *));
+                break;
+
+            default:    // Invalid
+                abort();
+            }
+        else            // Normal character
+            putchar(ch);
+    }
+
+    putchar('\n');
+}
+
+void println(const char *fmt, ...)
+{
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vprintln(fmt, ap);
     va_end(ap);
+}
 
-    // Print newline
-    fputc('\n', stderr);
-
-    // Panic
+__attribute__((noreturn)) void err(const char *fmt, ...)
+{
+    printf("Error: ");
+    va_list ap;
+    va_start(ap, fmt);
+    vprintln(fmt, ap);
+    va_end(ap);
     abort();
 }
 

@@ -23,7 +23,7 @@ static inline tk_t *want(cc3_t *self, int want_type)
 {
     tk_t *tk = lex_tok(&self->lexer, 0);
     if (tk->type != want_type)
-        err("Unexpected token %s", tk_str(tk));
+        err("Unexpected token %t", tk);
     lex_adv(&self->lexer);
     return tk;
 }
@@ -87,7 +87,7 @@ expr_t *primary_expression(cc3_t *self)
         }
         break;
     default:
-        err("Invalid primary expression %s", tk_str(tk));
+        err("Invalid primary expression %t", tk);
     }
 
     return expr;
@@ -436,12 +436,11 @@ static memb_t *member_list(cc3_t *self)
         int sc;
         ty_t *base_ty = declaration_specifiers(self, &sc);
         if (!base_ty)
-            err("Expected declaration in struct/union");
+            err("Expected declaration instead of %t", peek(self, 0));
         if (sc != -1)
             err("Storge class not allowed in struct/union");
 
         if (!maybe_want(self, TK_SEMICOLON)) {
-
             do {
                 /* FIXME: anonymous bitfield
                 if (maybe_want(self, TK_COLON)) {
@@ -451,33 +450,26 @@ static memb_t *member_list(cc3_t *self)
                 */
 
                 char *name;
-                ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
-                *tail = make_memb(ty, name);
+                ty_t *ty = declarator(self, base_ty, false, &name);
 
                 /* FIXME: bitfield
                 if (maybe_want(self, TK_COLON))
                     constant_expression(self);
                 */
 
-                tail = &(*tail)->next;              // Advance member list
-
+                // Append member
+                *tail = make_memb(ty, name);
+                tail = &(*tail)->next;
             } while (maybe_want(self, TK_COMMA));   // Another declarator after ,
-
             want(self, TK_SEMICOLON);               // Must end with ;
         } else {
             // [GNU] An anonymous struct/union is allowed as a member
-            if (base_ty->kind != TY_TAG
-                    || (base_ty->tag->kind != TAG_STRUCT
-                        && base_ty->tag->kind != TAG_UNION)
+            if ((base_ty->kind != TY_STRUCT && base_ty->kind != TY_UNION)
                     || !base_ty->tag->defined)
                 err("Invalid anonymous member");
-
-            *tail = make_memb(clone_ty(base_ty), NULL);
+            *tail = make_memb(base_ty, NULL);
             tail = &(*tail)->next;
         }
-
-        free_ty(base_ty);                       // Cloned for each declaration
-
     } while (!maybe_want(self, TK_RCURLY));
 
     return members;
@@ -768,17 +760,17 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
         case TK_STRUCT:
             if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-            ty = make_ty_tag(struct_specifier(self));
+            ty = make_ty_tag(TY_STRUCT, struct_specifier(self));
             goto set_match;
         case TK_UNION:
             if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-            ty = make_ty_tag(union_specifier(self));
+            ty = make_ty_tag(TY_UNION, union_specifier(self));
             goto set_match;
         case TK_ENUM:
             if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-            ty = make_ty_tag(enum_specifier(self));
+            ty = make_ty_tag(TY_ENUM, enum_specifier(self));
             goto set_match;
 
         // Might be a typedef name
@@ -920,7 +912,7 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
             sema_enter(&self->sema);
 
             // Then we can start reading the parameters
-            ty_t *param_tys = NULL, **tail = &param_tys;
+            param_t *params = NULL, **tail = &params;
             bool var = false;
 
             if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
@@ -928,17 +920,35 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
                 adv(self);
                 adv(self);
             } else {
-                // Otherwise a regular parameter type list must follow
                 for (;;) {
+                    // Read parameter type
                     int sc;
-                    if (!(*tail = declaration_specifiers(self, &sc)))
-                        break;
-
+                    ty_t *ty;
                     char *name;
-                    *tail = make_param(declarator(self, *tail, true, &name));
+                    if (!(ty = declaration_specifiers(self, &sc)))
+                        err("Expected declaration instead of %t", peek(self, 0));
+                    ty = declarator(self, ty, true, &name);
 
+                    // Adjust parameter type as appropriate
+                    switch (ty->kind) {
+                    case TY_VOID:
+                        err("Parameter type cannot be void");
+                    case TY_ARRAY:
+                        ty->kind = TY_POINTER;
+                        break;
+                    case TY_FUNCTION:
+                        ty = make_pointer(ty);
+                        break;
+                    }
+
+                    // Declare symbol if named
+                    sym_t *sym = NULL;
                     if (name)
-                        (*tail)->sym = sema_declare(&self->sema, sc, clone_ty(*tail), name);
+                        sym = sema_declare(&self->sema, sc, ty, name);
+
+                    // Append parameter to the list
+                    *tail = make_param(ty, sym);
+                    tail = &(*tail)->next;
 
                     // If there is no comma the end was reached
                     if (!maybe_want(self, TK_COMMA))
@@ -949,15 +959,12 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
                         var = true;
                         break;
                     }
-
-                    tail = &(*tail)->next;
                 }
 
                 want(self, TK_RPAREN);
             }
 
-            ty = make_function(ty, param_tys, var);
-            ty->function.scope = sema_pop(&self->sema);
+            ty = make_function(ty, sema_pop(&self->sema), params, var);
             continue;
         }
 
@@ -1046,7 +1053,7 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
         do {
             // Read declarator
             char *name;
-            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
+            ty_t *ty = declarator(self, base_ty, false, &name);
 
             // Trigger semantic action
             sym_t *sym = sema_declare(&self->sema, sc, ty, name);
@@ -1058,7 +1065,7 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
                 // Add local initialization "statement" if the target is local
                 if (sym->offset != -1) {
                     stmt_t *stmt = make_stmt(STMT_INIT);
-                    stmt->init.ty = clone_ty(sym->ty);
+                    stmt->init.ty = sym->ty;
                     stmt->init.offset = sym->offset;
                     stmt->arg1 = expr;
                     append_stmt(tail, stmt);
@@ -1071,9 +1078,6 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
         // Declarators must end with ;
         want(self, TK_SEMICOLON);
     }
-
-    free_ty(base_ty);
-
     return true;
 }
 
@@ -1288,17 +1292,15 @@ void parse(cc3_t *self)
         if (!maybe_want(self, TK_SEMICOLON)) {
             // Read first declarator
             char *name;
-            ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
-
+            ty_t *ty = declarator(self, base_ty, false, &name);
             // Trigger semantic action
             sym_t *sym = sema_declare(&self->sema, sc, ty, name);
-            assert(sym->ty == ty);  // This was an awful bug!!
 
             // Check for function definition
             if (maybe_want(self, TK_LCURLY)) {
                 // Make sure it is really a function
                 if (ty->kind != TY_FUNCTION)
-                    err("Function body after non-function declaration");
+                    err("Expected function type instead of %T", ty);
 
                 // Mark the symbol as having a definition
                 sym->had_def = true;
@@ -1310,51 +1312,43 @@ void parse(cc3_t *self)
 
                 // Now we can allocate space in the stack frame for the
                 // parameters of the current function
-                for (ty_t *param = ty->function.param_tys; param; param = param->next) {
+                for (param_t *param = ty->function.params; param; param = param->next) {
                     if (!param->sym)
                         err("Unnamed parameters are not allowed in function definitions");
-                    self->sema.offset = align(self->sema.offset, ty_align(param));
+                    self->sema.offset = align(self->sema.offset, ty_align(param->ty));
                     param->sym->offset = self->sema.offset;
-                    self->sema.offset += ty_size(param);
+                    self->sema.offset += ty_size(param->ty);
                 }
-                // And then bring the parameters back into scope for parsing
-                // the function body
+
+                // Bring parameters into scope for parsing the function body
                 sema_push(&self->sema, ty->function.scope);
-                // Parse the body
                 stmt_t *body = read_block(self);
-                // We are done with the function's scope here
                 sema_exit(&self->sema);
 
                 // Then we can generate the function, providing the correct
                 // frame size from the hack above
                 gen_func(&self->gen, sym, self->sema.offset, body);
-
-                free_ty(base_ty);
-                continue;
-            }
-
-            // If it's not a function it might have an initializer
-            if (maybe_want(self, TK_AS))
-                initializer(self);
-
-            // And further declarations might follow
-            while (maybe_want(self, TK_COMMA)) {
-                char *name;
-                ty_t *ty = declarator(self, clone_ty(base_ty), false, &name);
-
-                // Trigger semantic action
-                sema_declare(&self->sema, sc, ty, name);
-
+            } else {
+                // If it's not a function it might have an initializer
                 if (maybe_want(self, TK_AS))
                     initializer(self);
+
+                // And further declarations might follow
+                while (maybe_want(self, TK_COMMA)) {
+                    char *name;
+                    ty_t *ty = declarator(self, base_ty, false, &name);
+
+                    // Trigger semantic action
+                    sema_declare(&self->sema, sc, ty, name);
+
+                    if (maybe_want(self, TK_AS))
+                        initializer(self);
+                }
+
+                // The list must end with a ;
+                want(self, TK_SEMICOLON);
             }
-
-            // The list must end with a ;
-            want(self, TK_SEMICOLON);
         }
-
-        // Free base type
-        free_ty(base_ty);
     }
 
     want(self, TK_EOF);

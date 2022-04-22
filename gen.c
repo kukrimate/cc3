@@ -393,7 +393,7 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
         if (val) {
             int lfall = next_label(self);
             gen_bool(self, jmp_ctx, expr->arg1, false, lfall);
-            gen_bool(self, jmp_ctx, expr->arg1, true, label);
+            gen_bool(self, jmp_ctx, expr->arg2, true, label);
             emit_target(self, lfall);
         } else {
             gen_bool(self, jmp_ctx, expr->arg1, false, label);
@@ -407,7 +407,7 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
         } else {
             int lfall = next_label(self);
             gen_bool(self, jmp_ctx, expr->arg1, true, lfall);
-            gen_bool(self, jmp_ctx, expr->arg1, false, label);
+            gen_bool(self, jmp_ctx, expr->arg2, false, label);
             emit_target(self, lfall);
         }
         break;
@@ -446,6 +446,7 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offse
         break;
     case TY_INT:
     case TY_UINT:
+    case TY_ENUM:
         gen_init_value(self, jmp_ctx, expr);
         emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
         break;
@@ -457,50 +458,40 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offse
         gen_init_value(self, jmp_ctx, expr);
         emit_code(self, "mov qword [rbp - %d], rax\n", self->offset - offset);
         break;
-    case TY_TAG:
-        switch (ty->tag->kind) {
-        case TAG_STRUCT:
-            if (expr) {
-                if (expr->kind != EXPR_INIT)
-                    err("Expected initializer list");
-                expr = expr->arg1;
-            }
-
-            // Struct initializers can initialize all entries
-            for (memb_t *memb = ty->tag->members; memb; memb = memb->next) {
-                gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, expr);
-                if (expr)
-                    expr = expr->next;
-            }
-
-            // Make sure the initializer list has no more elements
-            if (expr)
-                err("Trailing garbage in initializer list");
-
-            break;
-
-        case TAG_UNION:
-            if (expr) {
-                if (expr->kind != EXPR_INIT)
-                    err("Expected initializer list");
-                expr = expr->arg1;
-            }
-
-            // Union initializers can only initializer the first member
-            memb_t *memb = ty->tag->members;
-            gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, expr);
-
-            // Make sure the initializer list has no more elements
-            if (expr->next)
-                err("Trailing garbage in initializer list");
-
-            break;
-        case TAG_ENUM:
-            // Same as int
-            gen_init_value(self, jmp_ctx, expr);
-            emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
-            break;
+    case TY_STRUCT:
+        if (expr) {
+            if (expr->kind != EXPR_INIT)
+                err("Expected initializer list");
+            expr = expr->arg1;
         }
+
+        // Struct initializers can initialize all entries
+        for (memb_t *memb = ty->tag->members; memb; memb = memb->next) {
+            gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, expr);
+            if (expr)
+                expr = expr->next;
+        }
+
+        // Make sure the initializer list has no more elements
+        if (expr)
+            err("Trailing garbage in initializer list");
+
+        break;
+    case TY_UNION:
+        if (expr) {
+            if (expr->kind != EXPR_INIT)
+                err("Expected initializer list");
+            expr = expr->arg1;
+        }
+
+        // Union initializers can only initializer the first member
+        memb_t *memb = ty->tag->members;
+        gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, expr);
+
+        // Make sure the initializer list has no more elements
+        if (expr->next)
+            err("Trailing garbage in initializer list");
+
         break;
     case TY_ARRAY:
         {
@@ -713,7 +704,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         }
 }
 
-static void gen_param_spill(gen_t *self, int offset, ty_t *ty, int i)
+static void gen_param_spill(gen_t *self, sym_t *sym, int i)
 {
     assert(i < 6);
 
@@ -722,43 +713,29 @@ static void gen_param_spill(gen_t *self, int offset, ty_t *ty, int i)
     static const char *dw[] = { "edi", "esi", "edx", "ecx", "r8d", "r9d" };
     static const char *qw[] = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" };
 
-    switch (ty->kind) {
+    switch (sym->ty->kind) {
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
     case TY_BOOL:
-        emit_code(self, "mov byte [rbp - %d], %s\n", self->offset - offset, byte[i]);
+        emit_code(self, "mov byte [rbp - %d], %s\n", self->offset - sym->offset, byte[i]);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "mov word [rbp - %d], %s\n", self->offset - offset, word[i]);
+        emit_code(self, "mov word [rbp - %d], %s\n", self->offset - sym->offset, word[i]);
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - offset, dw[i]);
+    case TY_ENUM:
+        emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - sym->offset, dw[i]);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "mov qword [rbp - %d], %s\n", self->offset - offset, qw[i]);
+        emit_code(self, "mov qword [rbp - %d], %s\n", self->offset - sym->offset, qw[i]);
         break;
-    case TY_TAG:
-        switch (ty->tag->kind) {
-        case TAG_STRUCT:
-            ASSERT_NOT_REACHED();
-            break;
-        case TAG_UNION:
-            ASSERT_NOT_REACHED();
-            break;
-        case TAG_ENUM:
-            emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - offset, dw[i]);
-            break;
-        }
-        break;
-    case TY_ARRAY:
-        ASSERT_NOT_REACHED();
     default:
         ASSERT_NOT_REACHED();
     }
@@ -779,10 +756,10 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
     self->label_cnt = 0;
 
     // Generate parameter spill code
+    param_t *param = sym->ty->function.params;
     int param_i = 0;
-    for (ty_t *param = sym->ty->function.param_tys; param; param = param->next) {
-        gen_param_spill(self, param->sym->offset, param, param_i++);
-    }
+    for (; param; param = param->next)
+        gen_param_spill(self, param->sym, param_i++);
 
     // Generate body
     jmp_ctx_t func_ctx = {

@@ -16,11 +16,20 @@
 /** Align (up) val to the nearest multiple of bound **/
 int align(int val, int bound);
 
+/** Print a message **/
+void println(const char *fmt, ...);
+
 /** Exit with an error message **/
 __attribute__((noreturn)) void err(const char *fmt, ...);
 
-/** Resizable string abstraction **/
+/** Print a debugging message **/
+#ifdef NDEBUG
+#define debugln(fmt, ...)
+#else
+#define debugln(fmt, ...) println(fmt, __VA_ARGS__)
+#endif
 
+/** Resizable string abstraction **/
 typedef struct string string_t;
 
 struct string {
@@ -226,6 +235,18 @@ struct tag {
     int size;           // Struct/union size
 };
 
+typedef struct param param_t;
+typedef struct sym sym_t;
+
+struct param {
+    param_t *next;
+
+    ty_t *ty;           // Type of parameter
+    sym_t *sym;         // Corresponding symbol (if named)
+};
+
+param_t *make_param(ty_t *ty, sym_t *sym);
+
 enum {
     TY_VOID,
     TY_CHAR,
@@ -243,19 +264,17 @@ enum {
     TY_DOUBLE,
     TY_LDOUBLE,
     TY_BOOL,
-    TY_TAG,
+    TY_STRUCT,
+    TY_UNION,
+    TY_ENUM,
     TY_POINTER,
     TY_ARRAY,
     TY_FUNCTION,
 };
 
 typedef struct scope scope_t;
-typedef struct sym sym_t;
 
 struct ty {
-    ty_t *next;
-    sym_t *sym; // Corresponding symbol (if a parameter)
-
     int kind;
 
     union {
@@ -272,23 +291,18 @@ struct ty {
 
         struct {
             ty_t *ret_ty;
-            ty_t *param_tys;
+            scope_t *scope;
+            param_t *params;
             bool var;
-
-            scope_t *scope;     // Function prototypes have their own scope
         } function;
     };
 };
 
 ty_t *make_ty(int kind);
-ty_t *make_ty_tag(tag_t *tag);
+ty_t *make_ty_tag(int kind, tag_t *tag);
 ty_t *make_pointer(ty_t *base_ty);
 ty_t *make_array(ty_t *elem_ty, int cnt);
-ty_t *make_param(ty_t *ty);
-ty_t *make_function(ty_t *ret_ty, ty_t *param_tys, bool var);
-
-ty_t *clone_ty(ty_t *ty);
-void free_ty(ty_t *ty);
+ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var);
 
 void print_ty(ty_t *ty);
 
