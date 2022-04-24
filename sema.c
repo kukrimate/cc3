@@ -586,182 +586,6 @@ expr_t *make_str_lit(const char *str)
     return expr;
 }
 
-expr_t *make_stmt_expr(stmt_t *body)
-{
-    expr_t *expr = make_expr(EXPR_STMT);
-
-    // Get the type of the last eval (or void)
-    stmt_t *last = body;
-    while (last->next)
-        last = last->next;
-    if (last && last->kind == STMT_EVAL)
-        expr->ty = last->arg1->ty;
-    else
-        expr->ty = make_ty(TY_VOID);
-
-    expr->body = body;
-    return expr;
-}
-
-// Is ty an integer type?
-static bool is_integer_ty(ty_t *ty)
-{
-    switch (ty->kind) {
-    case TY_CHAR:
-    case TY_SCHAR:
-    case TY_UCHAR:
-    case TY_SHORT:
-    case TY_USHORT:
-    case TY_INT:
-    case TY_UINT:
-    case TY_LONG:
-    case TY_ULONG:
-    case TY_LLONG:
-    case TY_ULLONG:
-    case TY_BOOL:
-        return true;
-    case TY_ENUM:
-        return ty->tag->defined;
-    default:
-        return false;
-    }
-}
-
-// Is ty an arithmetic type?
-static bool is_arith_ty(ty_t *ty)
-{
-    switch (ty->kind) {
-    case TY_CHAR:
-    case TY_SCHAR:
-    case TY_UCHAR:
-    case TY_SHORT:
-    case TY_USHORT:
-    case TY_INT:
-    case TY_UINT:
-    case TY_LONG:
-    case TY_ULONG:
-    case TY_LLONG:
-    case TY_ULLONG:
-    case TY_BOOL:
-    case TY_FLOAT:
-    case TY_DOUBLE:
-    case TY_LDOUBLE:
-        return true;
-    case TY_ENUM:
-        return ty->tag->defined;
-    default:
-        return false;
-    }
-}
-
-// Is ty a scalar type?
-static bool is_scalar_ty(ty_t *ty)
-{
-    switch (ty->kind) {
-    // By definition scalar
-    case TY_CHAR:
-    case TY_SCHAR:
-    case TY_UCHAR:
-    case TY_SHORT:
-    case TY_USHORT:
-    case TY_INT:
-    case TY_UINT:
-    case TY_LONG:
-    case TY_ULONG:
-    case TY_LLONG:
-    case TY_ULLONG:
-    case TY_BOOL:
-    case TY_FLOAT:
-    case TY_DOUBLE:
-    case TY_LDOUBLE:
-    case TY_POINTER:
-
-    // Degrade to pointers in expressions
-    case TY_ARRAY:
-    case TY_FUNCTION:
-        return true;
-
-    // Might be non-scalar
-    case TY_ENUM:
-        return ty->tag->defined;
-
-    // Other types are not scalar
-    default:
-        return false;
-    }
-}
-
-// Does a value of type ty degrade to a pointer type and if so what is the base
-// type of said pointer?
-static ty_t *find_ptr_base(ty_t *ty)
-{
-    if (ty->kind == TY_POINTER)           // Actually a pointer
-        return ty->pointer.base_ty;
-    else if (ty->kind == TY_ARRAY)        // Degrades to pointer
-        return ty->array.elem_ty;
-    else if (ty->kind == TY_FUNCTION)     // Degrades to pointer
-        return ty;
-    else
-        return NULL;
-}
-
-expr_t *make_unary(int kind, expr_t *arg1)
-{
-    ty_t *ty;
-
-    switch (kind) {
-    case EXPR_REF:
-        ty = make_pointer(arg1->ty);
-        break;
-    case EXPR_DREF:
-        if (!(ty = find_ptr_base(arg1->ty)))
-            err("Pointer type required");
-        break;
-    case EXPR_POS:
-        if (arg1->kind == EXPR_CONST) {
-            arg1->val = arg1->val;
-            return arg1;
-        }
-        if (!is_arith_ty((ty = arg1->ty)))
-            err("Arihmetic type required");
-        return arg1;
-    case EXPR_NEG:
-        if (arg1->kind == EXPR_CONST) {
-            arg1->val = -arg1->val;
-            return arg1;
-        }
-        if (!is_arith_ty((ty = arg1->ty)))
-            err("Arihmetic type required");
-        break;
-    case EXPR_NOT:
-        if (arg1->kind == EXPR_CONST) {
-            arg1->val = ~arg1->val;
-            return arg1;
-        }
-        if (!is_integer_ty((ty = arg1->ty)))
-            err("Integer type required");
-        break;
-    case EXPR_LNOT:
-        if (arg1->kind == EXPR_CONST) {
-            arg1->val = !arg1->val;
-            return arg1;
-        }
-        if (!is_scalar_ty((ty = arg1->ty)))
-        ty = make_ty(TY_INT);
-        break;
-    case EXPR_INIT:
-        ty = NULL;  // Initializers don't have a type
-        break;
-    default:
-        ASSERT_NOT_REACHED();
-    }
-
-    expr_t *expr = make_expr(kind);
-    expr->ty = ty;
-    expr->arg1 = arg1;
-    return expr;
-}
-
 static int find_memb(ty_t *ty, const char *name, ty_t **out)
 {
     if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
@@ -795,9 +619,147 @@ expr_t *make_memb_expr(expr_t *arg1, const char *name)
     return expr;
 }
 
+
+// Does a value of type ty degrade to a pointer type and if so what is the base
+// type of said pointer?
+static ty_t *find_ptr_base(ty_t *ty)
+{
+    if (ty->kind == TY_POINTER)           // Actually a pointer
+        return ty->pointer.base_ty;
+    else if (ty->kind == TY_ARRAY)        // Degrades to pointer
+        return ty->array.elem_ty;
+    else if (ty->kind == TY_FUNCTION)     // Degrades to pointer
+        return ty;
+    else
+        return NULL;
+}
+
+expr_t *make_unary(int kind, expr_t *arg1)
+{
+    #define FOLD_ARITH(op)                          \
+        do {                                        \
+            arg1->val = op arg1->val;               \
+            return arg1;                            \
+        } while (0)
+
+    #define FOLD_LOGIC(op)                          \
+        do {                                        \
+            arg1->ty = make_ty(TY_INT);             \
+            arg1->val = op arg1->val;               \
+            return arg1;                            \
+        } while (0)
+
+    if (arg1->kind == EXPR_CONST)
+        switch (kind) {
+        case EXPR_NEG:  FOLD_ARITH(-);
+        case EXPR_NOT:  FOLD_ARITH(~);
+        case EXPR_LNOT: FOLD_LOGIC(!);
+        }
+
+    #undef FOLD_ARITH
+    #undef FOLD_LOGIC
+
+    switch (kind) {
+    case EXPR_REF:
+    {
+        expr_t *expr = make_expr(kind);
+        expr->ty = make_pointer(arg1->ty);
+        expr->arg1 = arg1;
+        return expr;
+    }
+    case EXPR_DREF:
+    {
+        expr_t *expr = make_expr(kind);
+        if (!(expr->ty = find_ptr_base(arg1->ty)))
+            err("Pointer type required");
+        expr->arg1 = arg1;
+        return expr;
+    }
+    case EXPR_NEG:
+    case EXPR_NOT:
+    {
+        expr_t *expr = make_expr(kind);
+        expr->ty = arg1->ty;
+        expr->arg1 = arg1;
+        return expr;
+    }
+    case EXPR_LNOT:
+    {
+        expr_t *expr = make_expr(kind);
+        expr->ty = make_ty(TY_INT);
+        expr->arg1 = arg1;
+        return expr;
+    }
+    case EXPR_INIT:
+    {
+        expr_t *expr = make_expr(kind);
+        expr->arg1 = arg1;
+        return expr;
+    }
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+static expr_t *make_ptradd(ty_t *base_ty, expr_t *ptr, expr_t *idx)
+{
+    expr_t *expr = make_expr(EXPR_ADD);
+    expr->ty = make_pointer(base_ty);
+    expr->arg1 = ptr;
+    expr->arg2 = make_binary(EXPR_MUL, idx,
+        make_const(make_ty(TY_ULONG), ty_size(base_ty)));
+    return expr;
+}
+
+static expr_t *make_ptrsub(ty_t *base_ty, expr_t *ptr1, expr_t *ptr2)
+{
+    expr_t *expr = make_expr(EXPR_SUB);
+    expr->ty = make_ty(TY_LONG);
+    expr->arg1 = ptr1;
+    expr->arg1 = ptr2;
+    return make_binary(EXPR_DIV, expr,
+        make_const(make_ty(TY_INT), ty_size(base_ty)));
+}
+
 expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
 {
-    expr_t *expr = make_expr(kind);
+    #define FOLD_ARITH(op)                      \
+        do {                                    \
+            arg1->val = arg1->val op arg2->val; \
+            return arg1;                        \
+        } while (0)
+
+    #define FOLD_LOGIC(op)                      \
+        do {                                    \
+            arg1->ty = make_ty(TY_INT);         \
+            arg1->val = arg1->val op arg2->val; \
+            return arg1;                        \
+        } while (0)
+
+    if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST)
+        switch (kind) {
+        case EXPR_MUL:  FOLD_ARITH(*);
+        case EXPR_DIV:  FOLD_ARITH(/);
+        case EXPR_MOD:  FOLD_ARITH(%);
+        case EXPR_ADD:  FOLD_ARITH(+);
+        case EXPR_SUB:  FOLD_ARITH(-);
+        case EXPR_LSH:  FOLD_ARITH(<<);
+        case EXPR_RSH:  FOLD_ARITH(>>);
+        case EXPR_AND:  FOLD_ARITH(&);
+        case EXPR_XOR:  FOLD_ARITH(^);
+        case EXPR_OR:   FOLD_ARITH(|);
+        case EXPR_LT:   FOLD_LOGIC(<);
+        case EXPR_GT:   FOLD_LOGIC(>);
+        case EXPR_LE:   FOLD_LOGIC(<=);
+        case EXPR_GE:   FOLD_LOGIC(>=);
+        case EXPR_EQ:   FOLD_LOGIC(==);
+        case EXPR_NE:   FOLD_LOGIC(!=);
+        case EXPR_LAND: FOLD_LOGIC(&&);
+        case EXPR_LOR:  FOLD_LOGIC(||);
+        }
+
+    #undef FOLD_ARITH
+    #undef FOLD_LOGIC
 
     switch (kind) {
     case EXPR_CALL:
@@ -805,77 +767,48 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
         ty_t *func_ty = find_ptr_base(arg1->ty);
         if (!func_ty || func_ty->kind != TY_FUNCTION)
             err("Non-function object called");
-        expr->ty = func_ty->function.ret_ty;
-        break;
-    }
 
-    case EXPR_MUL:
-        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
-            arg1->val *= arg2->val;
-            return arg1;
-        }
-        expr->ty = arg1->ty;
-        break;
-    case EXPR_DIV:
-        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
-            arg1->val /= arg2->val;
-            return arg1;
-        }
-        expr->ty = arg1->ty;
-        break;
-    case EXPR_MOD:
-        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
-            arg1->val %= arg2->val;
-            return arg1;
-        }
-        expr->ty = arg1->ty;
-        break;
+        expr_t *expr = make_expr(kind);
+        expr->ty = func_ty->function.ret_ty;
+        expr->arg1 = arg1;
+        expr->arg2 = arg2;
+        return expr;
+    }
 
     case EXPR_ADD:
     {
-        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
-            arg1->val += arg2->val;
-            return arg1;
-        }
-
-        ty_t *ty;
-
-        if ((ty = find_ptr_base(arg1->ty))) {
-            if (!is_integer_ty(arg2->ty))
-                err("Pointer offset must be integer");
-            arg2 = make_binary(EXPR_MUL, arg2,
-                make_const(make_ty(TY_INT), ty_size(ty)));
-            expr->ty = make_pointer(ty);
-        } else if ((ty = find_ptr_base(arg2->ty))) {
-            if (!is_integer_ty(arg1->ty))
-                err("Pointer offset must be integer");
-            arg1 = make_binary(EXPR_MUL, arg1,
-                make_const(make_ty(TY_INT), ty_size(ty)));
-            expr->ty = make_pointer(ty);
-        } else {
-            if (!is_arith_ty(arg1->ty) || !is_arith_ty(arg2->ty))
-                err("Arihmetic type required");
-            expr->ty = arg1->ty;
-        }
-        break;
+        ty_t *base_ty;
+        if ((base_ty = find_ptr_base(arg1->ty)))
+            return make_ptradd(base_ty, arg1, arg2);
+        if ((base_ty = find_ptr_base(arg2->ty)))
+            return make_ptradd(base_ty, arg2, arg1);
+        goto make_arith;
     }
 
     case EXPR_SUB:
-        if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST) {
-            arg1->val -= arg2->val;
-            return arg1;
-        }
+    {
+        ty_t *base_ty1, *base_ty2;
+        if ((base_ty1 = find_ptr_base(arg1->ty)) && (base_ty2 = find_ptr_base(arg2->ty)))
+            return make_ptrsub(base_ty1, arg1, arg2);
+        goto make_arith;
+    }
 
-        expr->ty = arg1->ty;
-        break;
-
+    case EXPR_MUL:
+    case EXPR_DIV:
+    case EXPR_MOD:
     case EXPR_LSH:
     case EXPR_RSH:
     case EXPR_AND:
     case EXPR_XOR:
     case EXPR_OR:
+    make_arith:
+    {
+        expr_t *expr = make_expr(kind);
         expr->ty = arg1->ty;
-        break;
+        expr->arg1 = arg1;
+        expr->arg2 = arg2;
+        return expr;
+    }
 
     case EXPR_LT:
     case EXPR_GT:
@@ -885,23 +818,27 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     case EXPR_NE:
     case EXPR_LAND:
     case EXPR_LOR:
+    {
+        expr_t *expr = make_expr(kind);
         expr->ty = make_ty(TY_INT);
-        break;
+        expr->arg1 = arg1;
+        expr->arg2 = arg2;
+        return expr;
+    }
 
     case EXPR_AS:
-        expr->ty = arg1->ty;
-        break;
-
     case EXPR_SEQ:
+    {
+        expr_t *expr = make_expr(kind);
         expr->ty = arg2->ty;
-        break;
+        expr->arg1 = arg1;
+        expr->arg2 = arg2;
+        return expr;
+    }
 
     default:
         ASSERT_NOT_REACHED();
     }
-    expr->arg1 = arg1;
-    expr->arg2 = arg2;
-    return expr;
 }
 
 expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
@@ -916,6 +853,23 @@ expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
     expr->arg1 = arg1;
     expr->arg2 = arg2;
     expr->arg3 = arg3;
+    return expr;
+}
+
+expr_t *make_stmt_expr(stmt_t *body)
+{
+    expr_t *expr = make_expr(EXPR_STMT);
+
+    // Get the type of the last eval (or void)
+    stmt_t *last = body;
+    while (last->next)
+        last = last->next;
+    if (last && last->kind == STMT_EVAL)
+        expr->ty = last->arg1->ty;
+    else
+        expr->ty = make_ty(TY_VOID);
+
+    expr->body = body;
     return expr;
 }
 

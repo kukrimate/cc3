@@ -390,8 +390,7 @@ enum {
     EXPR_REF,   // Pointer creation
     EXPR_DREF,  // Pointer indirection
 
-    EXPR_POS,   // Unary arithmetic
-    EXPR_NEG,
+    EXPR_NEG,   // Unary arithmetic
     EXPR_NOT,
 
     EXPR_MUL,   // Binary arithmetic
@@ -450,12 +449,14 @@ struct expr {
 expr_t *make_sym(sema_t *self, const char *name);
 expr_t *make_const(ty_t *ty, val_t val);
 expr_t *make_str_lit(const char *str);
-expr_t *make_stmt_expr(stmt_t *body);
+
+expr_t *make_memb_expr(expr_t *arg1, const char *name);
 
 expr_t *make_unary(int kind, expr_t *arg1);
-expr_t *make_memb_expr(expr_t *arg1, const char *name);
 expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2);
 expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3);
+
+expr_t *make_stmt_expr(stmt_t *body);
 
 /** Statements **/
 
