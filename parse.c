@@ -364,7 +364,7 @@ int constant_expression(cc3_t *self)
     expr_t *expr = conditional_expression(self);
     if (expr->kind != EXPR_CONST)
         err("Expected constant expression");
-    return expr->val;
+    return expr->as_const.value;
 }
 
 /** Initializers **/
@@ -391,36 +391,39 @@ end:
 }
 #endif
 
-static expr_t *initializer_list(cc3_t *self);
-
-static expr_t *initializer(cc3_t *self)
+// Check for the end of a comma seperated list enclosed in braces
+static bool end_comma_separated(cc3_t *self)
 {
+    if (maybe_want(self, TK_COMMA)) {
+        if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
+            return true;
+    } else {
+        want(self, TK_RCURLY);              // Otherwise the list must end
+        return true;
+    }
+    return false;
+}
+
+static init_t *initializer(cc3_t *self)
+{
+    init_t *init = make_init();
+
     // FIXME: implement these
     // designation(self);
 
-    if (maybe_want(self, TK_LCURLY))
-        return initializer_list(self);
-    else
-        return assignment_expression(self);
-}
-
-static expr_t *initializer_list(cc3_t *self)
-{
-    expr_t *head = NULL, **tail = &head;
-    for (;;) {
-        // Append initializer to the list
-        *tail = initializer(self);
-        tail = &(*tail)->next;
-        // Check for the end of the list
-        if (maybe_want(self, TK_COMMA)) {
-            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
-                break;
-        } else {
-            want(self, TK_RCURLY);              // Otherwise the list must end
-            break;
-        }
+    if (maybe_want(self, TK_LCURLY)) {
+        init->kind = INIT_LIST;
+        init_t **tail = &init->as_list;
+        do {
+            *tail = initializer(self);
+            tail = &(*tail)->next;
+        } while (!end_comma_separated(self));
+    } else {
+        init->kind = INIT_EXPR;
+        init->as_expr = assignment_expression(self);
     }
-    return make_unary(EXPR_INIT, head);
+
+    return init;
 }
 
 /** Declarations **/
@@ -465,7 +468,7 @@ static memb_t *member_list(cc3_t *self)
         } else {
             // [GNU] An anonymous struct/union is allowed as a member
             if ((base_ty->kind != TY_STRUCT && base_ty->kind != TY_UNION)
-                    || !base_ty->tag->defined)
+                    || !base_ty->as_aggregate.members)
                 err("Invalid anonymous member");
             *tail = make_memb(base_ty, NULL);
             tail = &(*tail)->next;
@@ -475,52 +478,48 @@ static memb_t *member_list(cc3_t *self)
     return members;
 }
 
-static tag_t *struct_specifier(cc3_t *self)
+static ty_t *struct_specifier(cc3_t *self)
 {
     tk_t *tk;
-    tag_t *tag;
-
     if ((tk = maybe_want(self, TK_IDENTIFIER))) {
         if (maybe_want(self, TK_LCURLY)) {
             // Tagged struct defintion
-            tag = sema_define_tag(&self->sema, TAG_STRUCT, tk_str(tk));
-            tag->members = pack_struct(member_list(self), &tag->align, &tag->size);
+            ty_t *ty = sema_define_tag(&self->sema, TY_STRUCT, tk_str(tk));
+            define_struct(ty, member_list(self));
+            return ty;
         } else {
             // Forward struct declaration
-            tag = sema_forward_declare_tag(&self->sema, TAG_STRUCT, tk_str(tk));
+            return sema_forward_declare_tag(&self->sema, TY_STRUCT, tk_str(tk));
         }
     } else {
         // Untagged struct
         want(self, TK_LCURLY);
-        tag = sema_define_tag(&self->sema, TAG_STRUCT, NULL);
-        tag->members = pack_struct(member_list(self), &tag->align, &tag->size);
+        ty_t *ty = make_ty(TY_STRUCT);
+        define_struct(ty, member_list(self));
+        return ty;
     }
-
-    return tag;
 }
 
-static tag_t *union_specifier(cc3_t *self)
+static ty_t *union_specifier(cc3_t *self)
 {
     tk_t *tk;
-    tag_t *tag;
-
     if ((tk = maybe_want(self, TK_IDENTIFIER))) {
         if (maybe_want(self, TK_LCURLY)) {
             // Tagged struct defintion
-            tag = sema_define_tag(&self->sema, TAG_UNION, tk_str(tk));
-            tag->members = pack_union(member_list(self), &tag->align, &tag->size);
+            ty_t *ty = sema_define_tag(&self->sema, TY_UNION, tk_str(tk));
+            define_union(ty, member_list(self));
+            return ty;
         } else {
             // Forward struct declaration
-            tag = sema_forward_declare_tag(&self->sema, TAG_UNION, tk_str(tk));
+            return sema_forward_declare_tag(&self->sema, TY_UNION, tk_str(tk));
         }
     } else {
         // Untagged struct
         want(self, TK_LCURLY);
-        tag = sema_define_tag(&self->sema, TAG_UNION, NULL);
-        tag->members = pack_union(member_list(self), &tag->align, &tag->size);
+        ty_t *ty = make_ty(TY_UNION);
+        define_union(ty, member_list(self));
+        return ty;
     }
-
-    return tag;
 }
 
 static void enumerator_list(cc3_t *self)
@@ -548,28 +547,21 @@ static void enumerator_list(cc3_t *self)
     }
 }
 
-static tag_t *enum_specifier(cc3_t *self)
+static void enum_specifier(cc3_t *self)
 {
-    tk_t *tk;
-    tag_t *tag;
-
-    if ((tk = maybe_want(self, TK_IDENTIFIER))) {
+    if (maybe_want(self, TK_IDENTIFIER)) {
         if (maybe_want(self, TK_LCURLY)) {
             // Tagged enum defintion
-            sema_define_tag(&self->sema, TAG_ENUM, tk_str(tk));
             enumerator_list(self);
         } else {
             // Forward enum declaration
-            sema_forward_declare_tag(&self->sema, TAG_ENUM, tk_str(tk));
+            ;
         }
     } else {
         // Untagged enum
         want(self, TK_LCURLY);
-        tag = sema_define_tag(&self->sema, TAG_ENUM, NULL);
         enumerator_list(self);
     }
-
-    return tag;
 }
 
 enum {
@@ -760,17 +752,18 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
         case TK_STRUCT:
             if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-            ty = make_ty_tag(TY_STRUCT, struct_specifier(self));
+            ty = struct_specifier(self);
             goto set_match;
         case TK_UNION:
             if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-            ty = make_ty_tag(TY_UNION, union_specifier(self));
+            ty = union_specifier(self);
             goto set_match;
         case TK_ENUM:
             if (ty || had_ts) err("Invalid type specifiers");
             adv(self);
-            ty = make_ty_tag(TY_ENUM, enum_specifier(self));
+            enum_specifier(self);
+            ty = make_ty(TY_INT);
             goto set_match;
 
         // Might be a typedef name
@@ -995,7 +988,6 @@ ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract,
 
         // The middle becomes the innermost declarator
         *dummy = *ty;
-        free(ty);
 
         return result;
     }
@@ -1060,14 +1052,12 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
 
             if (maybe_want(self, TK_AS)) {
                 // Read initializer
-                expr_t *expr = initializer(self);
-
+                init_t *init = initializer(self);
                 // Add local initialization "statement" if the target is local
                 if (sym->offset != -1) {
                     stmt_t *stmt = make_stmt(STMT_INIT);
-                    stmt->init.ty = sym->ty;
-                    stmt->init.offset = sym->offset;
-                    stmt->arg1 = expr;
+                    stmt->as_init.sym = sym;
+                    stmt->as_init.value = init;
                     append_stmt(tail, stmt);
                 } else {
                     // FIXME: add static data
@@ -1106,13 +1096,13 @@ void statement(cc3_t *self, stmt_t ***tail)
         if ((tk = peek(self, 0))->type == TK_IDENTIFIER
                 && peek(self, 1)->type == TK_COLON) {
             stmt_t *stmt = make_stmt(STMT_LABEL);
-            stmt->label = strdup(tk_str(tk));
+            stmt->as_label.label = strdup(tk_str(tk));
             adv(self);
             adv(self);
             append_stmt(tail, stmt);
         } else if (maybe_want(self, TK_CASE)) {
             stmt_t *stmt = make_stmt(STMT_CASE);
-            stmt->case_val = constant_expression(self);
+            stmt->as_case.value = constant_expression(self);
             want(self, TK_COLON);
             append_stmt(tail, stmt);
         } else if (maybe_want(self, TK_DEFAULT)) {
@@ -1137,15 +1127,15 @@ void statement(cc3_t *self, stmt_t ***tail)
 
         // Heading
         want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
+        stmt->as_if.cond = expression(self);
         want(self, TK_RPAREN);
 
         // Then
-        stmt->body1 = read_stmt(self);
+        stmt->as_if.then_body = read_stmt(self);
 
         // Else
         if (maybe_want(self, TK_ELSE))
-            stmt->body2 = read_stmt(self);
+            stmt->as_if.else_body = read_stmt(self);
 
         append_stmt(tail, stmt);
         return;
@@ -1157,11 +1147,11 @@ void statement(cc3_t *self, stmt_t ***tail)
 
         // Heading
         want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
+        stmt->as_switch.cond = expression(self);
         want(self, TK_RPAREN);
 
         // Body
-        stmt->body1 = read_stmt(self);
+        stmt->as_switch.body = read_stmt(self);
 
         append_stmt(tail, stmt);
         return;
@@ -1173,11 +1163,11 @@ void statement(cc3_t *self, stmt_t ***tail)
 
         // Heading
         want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
+        stmt->as_while.cond = expression(self);
         want(self, TK_RPAREN);
 
         // Body
-        stmt->body1 = read_stmt(self);
+        stmt->as_while.body = read_stmt(self);
 
         append_stmt(tail, stmt);
         return;
@@ -1188,12 +1178,12 @@ void statement(cc3_t *self, stmt_t ***tail)
         stmt_t *stmt = make_stmt(STMT_DO);
 
         // Body
-        stmt->body1 = read_stmt(self);
+        stmt->as_do.body = read_stmt(self);
 
         // Condition
         want(self, TK_WHILE);
         want(self, TK_LPAREN);
-        stmt->arg1 = expression(self);
+        stmt->as_do.cond = expression(self);
         want(self, TK_RPAREN);
         want(self, TK_SEMICOLON);
 
@@ -1213,21 +1203,21 @@ void statement(cc3_t *self, stmt_t ***tail)
 
         if (!block_scope_declaration(self, tail))
             if (!maybe_want(self, TK_SEMICOLON)) {
-                stmt->arg1 = expression(self);
+                stmt->as_for.init = expression(self);
                 want(self, TK_SEMICOLON);
             }
 
         if (!maybe_want(self, TK_SEMICOLON)) {
-            stmt->arg2 = expression(self);
+            stmt->as_for.cond = expression(self);
             want(self, TK_SEMICOLON);
         }
         if (!maybe_want(self, TK_RPAREN)) {
-            stmt->arg3 = expression(self);
+            stmt->as_for.incr = expression(self);
             want(self, TK_RPAREN);
         }
 
         // Body
-        stmt->body1 = read_stmt(self);
+        stmt->as_for.body = read_stmt(self);
 
         // Exit for scope
         sema_exit(&self->sema);
@@ -1239,7 +1229,7 @@ void statement(cc3_t *self, stmt_t ***tail)
     // Jumps
     if (maybe_want(self, TK_GOTO)) {
         stmt_t *stmt = make_stmt(STMT_GOTO);
-        stmt->label = strdup(tk_str(want(self, TK_IDENTIFIER)));
+        stmt->as_goto.label = strdup(tk_str(want(self, TK_IDENTIFIER)));
         want(self, TK_SEMICOLON);
         append_stmt(tail, stmt);
         return;
@@ -1260,7 +1250,7 @@ void statement(cc3_t *self, stmt_t ***tail)
     if (maybe_want(self, TK_RETURN)) {
         stmt_t *stmt = make_stmt(STMT_RETURN);
         if (!maybe_want(self, TK_SEMICOLON)) {
-            stmt->arg1 = expression(self);
+            stmt->as_return.value = expression(self);
             want(self, TK_SEMICOLON);
         }
         append_stmt(tail, stmt);
@@ -1270,7 +1260,7 @@ void statement(cc3_t *self, stmt_t ***tail)
     // Expression statement
     if (!maybe_want(self, TK_SEMICOLON)) {
         stmt_t *stmt = make_stmt(STMT_EVAL);
-        stmt->arg1 = expression(self);
+        stmt->as_return.value = expression(self);
         want(self, TK_SEMICOLON);
         append_stmt(tail, stmt);
     }

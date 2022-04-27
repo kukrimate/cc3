@@ -103,22 +103,25 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 {
     switch (expr->kind) {
         case EXPR_SYM:
-            if (expr->sym->kind == SYM_LOCAL) {
-                emit_code(self, "lea rax, [rbp - %d]\n", self->offset - expr->sym->offset);
-            } else {
-                emit_code(self, "mov rax, %s\n", expr->sym->name);
+            {
+                sym_t *sym = expr->as_sym;
+
+                if (sym->kind == SYM_LOCAL)
+                    emit_code(self, "lea rax, [rbp - %d]\n", self->offset - sym->offset);
+                else
+                    emit_code(self, "mov rax, %s\n", sym->name);
             }
             break;
         case EXPR_STR_LIT:
-            emit_str_lit(self, expr->str);
+            emit_str_lit(self, expr->as_str_lit.data);
             break;
         case EXPR_MEMB:
-            gen_addr(self, jmp_ctx, expr->arg1);
-            if (expr->offset)
-                emit_code(self, "add rax, %d\n", expr->offset);
+            gen_addr(self, jmp_ctx, expr->as_memb.aggr);
+            if (expr->as_memb.offset)
+                emit_code(self, "add rax, %d\n", expr->as_memb.offset);
             break;
         case EXPR_DREF:
-            gen_value(self, jmp_ctx, expr->arg1);
+            gen_value(self, jmp_ctx, expr->as_unary.arg);
             break;
         default:
             err("Expected lvalue expression");
@@ -154,7 +157,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         gen_addr(self, jmp_ctx, expr);
 
         switch (expr->ty->kind) {
-        // Extend smaller types to reguster
+        // Extend smaller types to fill rax
         case TY_CHAR:
         case TY_SCHAR:
             emit_code(self, "movsx rax, byte [rax]\n");
@@ -185,10 +188,10 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             emit_code(self, "mov rax, qword [rax]\n");
             break;
 
-        // FIXME: float loads
         case TY_FLOAT:
         case TY_DOUBLE:
         case TY_LDOUBLE:
+            // FIXME: float loads
             ASSERT_NOT_REACHED();
 
         // Other types are left as addresses
@@ -199,7 +202,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         break;
 
     case EXPR_CONST:
-        emit_code(self, "mov rax, %llu\n", expr->val);
+        emit_code(self, "mov rax, %llu\n", expr->as_const.value);
         break;
 
     case EXPR_CALL:
@@ -208,7 +211,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
         // Generate arguments
         int cnt = 0;
-        for (expr_t *arg = expr->arg2; arg; arg = arg->next) {
+        for (expr_t *arg = expr->as_binary.rhs; arg; arg = arg->next) {
             gen_value(self, jmp_ctx, arg);
             emit_code(self, "push rax\n");
             ++cnt;
@@ -219,7 +222,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             emit_code(self, "pop %s\n", qw[--cnt]);
 
         // Generate call target
-        gen_value(self, jmp_ctx, expr->arg1);
+        gen_value(self, jmp_ctx, expr->as_binary.lhs);
         emit_code(self, "mov r10, rax\n");
 
         // Do the call (zero rax for varargs)
@@ -228,13 +231,16 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     }
 
     case EXPR_REF:
-        gen_addr(self, jmp_ctx, expr->arg1);
+        gen_addr(self, jmp_ctx, expr->as_unary.arg);
         break;
 
     case EXPR_NEG:
+        gen_value(self, jmp_ctx, expr->as_unary.arg);
         emit_code(self, "neg rax\n");
         break;
+
     case EXPR_NOT:
+        gen_value(self, jmp_ctx, expr->as_unary.arg);
         emit_code(self, "not rax\n");
         break;
 
@@ -248,9 +254,9 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     case EXPR_AND:
     case EXPR_XOR:
     case EXPR_OR:
-        gen_value(self, jmp_ctx, expr->arg1);
+        gen_value(self, jmp_ctx, expr->as_binary.lhs);
         emit_code(self, "push rax\n");
-        gen_value(self, jmp_ctx, expr->arg2);
+        gen_value(self, jmp_ctx, expr->as_binary.rhs);
         emit_code(self,
             "mov rcx, rax\n"
             "pop rax\n"
@@ -282,9 +288,9 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
     case EXPR_AS:
     {
-        gen_value(self, jmp_ctx, expr->arg2);
+        gen_value(self, jmp_ctx, expr->as_binary.rhs);
         emit_code(self, "push rax\n");
-        gen_addr(self, jmp_ctx, expr->arg1);
+        gen_addr(self, jmp_ctx, expr->as_binary.lhs);
         emit_code(self,
             "mov rcx, rax\n"
             "pop rax\n");
@@ -310,14 +316,8 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         case TY_POINTER:
             emit_code(self, "mov qword [rcx], rax\n");
             break;
-        // FIXME: float loads
-        case TY_FLOAT:
-        case TY_DOUBLE:
-        case TY_LDOUBLE:
-            ASSERT_NOT_REACHED();
-        // Other types are left as addresses
         default:
-            break;
+            ASSERT_NOT_REACHED();
         }
         break;
     }
@@ -326,24 +326,24 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     {
         // Compile arg1 as the condition
         int lfalse = next_label(self), lend = next_label(self);
-        gen_bool(self, jmp_ctx, expr->arg1, false, lfalse);
+        gen_bool(self, jmp_ctx, expr->as_trinary.arg1, false, lfalse);
         // Evaluate arg2 in the true case
-        gen_value(self, jmp_ctx, expr->arg2);
+        gen_value(self, jmp_ctx, expr->as_trinary.arg2);
         emit_jump(self, "jmp", lend);
         emit_target(self, lfalse);
-        // Evaluate arg3 in the true case
-        gen_value(self, jmp_ctx, expr->arg3);
+        // Evaluate arg3 in the false case
+        gen_value(self, jmp_ctx, expr->as_trinary.arg3);
         emit_target(self, lend);
         break;
     }
 
     case EXPR_SEQ:
-        gen_value(self, jmp_ctx, expr->arg1);
-        gen_value(self, jmp_ctx, expr->arg2);
+        gen_value(self, jmp_ctx, expr->as_binary.lhs);
+        gen_value(self, jmp_ctx, expr->as_binary.rhs);
         break;
 
     case EXPR_STMT:
-        gen_stmts(self, jmp_ctx, expr->body);
+        gen_stmts(self, jmp_ctx, expr->as_stmt);
         break;
 
     default:
@@ -376,9 +376,9 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
     case EXPR_EQ:
     case EXPR_NE:
         // Generate comparison
-        gen_value(self,jmp_ctx, expr->arg1);
+        gen_value(self,jmp_ctx, expr->as_binary.lhs);
         emit_code(self, "push rax\n");
-        gen_value(self, jmp_ctx, expr->arg2);
+        gen_value(self, jmp_ctx, expr->as_binary.rhs);
         emit_code(self,
             "mov rcx, rax\n"
             "pop rax\n"
@@ -387,27 +387,27 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
         emit_jump(self, jcc(expr->kind, val), label);
         break;
     case EXPR_LNOT:
-        gen_bool(self, jmp_ctx, expr->arg1, !val, label);
+        gen_bool(self, jmp_ctx, expr->as_unary.arg, !val, label);
         break;
     case EXPR_LAND:
         if (val) {
             int lfall = next_label(self);
-            gen_bool(self, jmp_ctx, expr->arg1, false, lfall);
-            gen_bool(self, jmp_ctx, expr->arg2, true, label);
+            gen_bool(self, jmp_ctx, expr->as_binary.lhs, false, lfall);
+            gen_bool(self, jmp_ctx, expr->as_binary.rhs, true, label);
             emit_target(self, lfall);
         } else {
-            gen_bool(self, jmp_ctx, expr->arg1, false, label);
-            gen_bool(self, jmp_ctx, expr->arg2, false, label);
+            gen_bool(self, jmp_ctx, expr->as_binary.lhs, false, label);
+            gen_bool(self, jmp_ctx, expr->as_binary.rhs, false, label);
         }
         break;
     case EXPR_LOR:
         if (val) {
-            gen_bool(self, jmp_ctx, expr->arg1, true, label);
-            gen_bool(self, jmp_ctx, expr->arg2, true, label);
+            gen_bool(self, jmp_ctx, expr->as_binary.lhs, true, label);
+            gen_bool(self, jmp_ctx, expr->as_binary.rhs, true, label);
         } else {
             int lfall = next_label(self);
-            gen_bool(self, jmp_ctx, expr->arg1, true, lfall);
-            gen_bool(self, jmp_ctx, expr->arg2, false, label);
+            gen_bool(self, jmp_ctx, expr->as_binary.lhs, true, lfall);
+            gen_bool(self, jmp_ctx, expr->as_binary.rhs, false, label);
             emit_target(self, lfall);
         }
         break;
@@ -420,107 +420,113 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
     }
 }
 
-static void gen_init_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
+static void gen_initializer_scalar(gen_t *self, jmp_ctx_t *jmp_ctx,
+    ty_t *ty, int offset, expr_t *expr)
 {
-    // Either the value itself or zero
     if (expr)
+        // Then generate its value
         gen_value(self, jmp_ctx, expr);
     else
-        emit_code(self, "xor rax, rax\n");
-}
+        // Zero initialize subobjects without an initializer
+        emit_code(self, "xor eax, eax\n");
 
-static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offset, expr_t *expr)
-{
     switch (ty->kind) {
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
     case TY_BOOL:
-        gen_init_value(self, jmp_ctx, expr);
-        emit_code(self, "mov byte [rbp - %d], al\n", self->offset - offset);
+        emit_code(self, "mov [rbp - %d], al\n", self->offset - offset);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        gen_init_value(self, jmp_ctx, expr);
-        emit_code(self, "mov word [rbp - %d], ax\n", self->offset - offset);
+        emit_code(self, "mov [rbp - %d], ax\n", self->offset - offset);
         break;
     case TY_INT:
     case TY_UINT:
-    case TY_ENUM:
-        gen_init_value(self, jmp_ctx, expr);
-        emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
+        emit_code(self, "mov [rbp - %d], eax\n", self->offset - offset);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        gen_init_value(self, jmp_ctx, expr);
-        emit_code(self, "mov qword [rbp - %d], rax\n", self->offset - offset);
+        emit_code(self, "mov [rbp - %d], rax\n", self->offset - offset);
         break;
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
+    ty_t *ty, int offset, init_t *init);
+
+static void gen_initializer_aggregate(gen_t *self, jmp_ctx_t *jmp_ctx,
+    ty_t *ty, int offset, init_t *init)
+{
+    switch (ty->kind) {
     case TY_STRUCT:
-        if (expr) {
-            if (expr->kind != EXPR_INIT)
-                err("Expected initializer list");
-            expr = expr->arg1;
-        }
-
         // Struct initializers can initialize all entries
-        for (memb_t *memb = ty->tag->members; memb; memb = memb->next) {
-            gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, expr);
-            if (expr)
-                expr = expr->next;
+        for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
+            gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, init);
+            if (init)
+                init = init->next;
         }
-
-        // Make sure the initializer list has no more elements
-        if (expr)
-            err("Trailing garbage in initializer list");
-
         break;
     case TY_UNION:
-        if (expr) {
-            if (expr->kind != EXPR_INIT)
-                err("Expected initializer list");
-            expr = expr->arg1;
+        {
+            // Union initializers can only initializer the first member
+            memb_t *memb = ty->as_aggregate.members;
+            gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, init);
         }
-
-        // Union initializers can only initializer the first member
-        memb_t *memb = ty->tag->members;
-        gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, expr);
-
-        // Make sure the initializer list has no more elements
-        if (expr->next)
-            err("Trailing garbage in initializer list");
-
         break;
     case TY_ARRAY:
         {
-            if (expr) {
-                if (expr->kind != EXPR_INIT)
-                    err("Expected initializer list");
-                expr = expr->arg1;
-            }
-
             // Save array element type and its size
             ty_t *elem_ty = ty->array.elem_ty;
             int elem_size = ty_size(elem_ty);
 
             // Each array element can have an initializer
             for (int i = 0; i < ty->array.cnt; ++i) {
-                gen_initializer(self, jmp_ctx, elem_ty, offset, expr);
-                if (expr)
-                    expr = expr->next;
+                gen_initializer(self, jmp_ctx, elem_ty, offset, init);
+                if (init)
+                    init = init->next;
                 offset += elem_size;
             }
-
-            // Make sure the initializer list has no more elements
-            if (expr)
-                err("Trailing garbage in initializer list");
-            
-            break;
         }
+        break;
     default:
         ASSERT_NOT_REACHED();
+    }
+}
+
+static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
+    ty_t *ty, int offset, init_t *init)
+{
+    switch (ty->kind) {
+    case TY_STRUCT:
+    case TY_UNION:
+    case TY_ARRAY:
+        {
+            init_t *list = NULL;
+            if (init) {
+                if (init->kind != INIT_LIST)
+                    err("Sclar initializer provided for aggregate");
+                list = init->as_list;
+            }
+            gen_initializer_aggregate(self, jmp_ctx, ty, offset, list);
+        }
+        break;
+    default:
+        {
+            expr_t *expr = NULL;
+            if (init) {
+                if (init->kind != INIT_EXPR)
+                    err("Initializer list provided for scalar");
+                expr = init->as_expr;
+            }
+            gen_initializer_scalar(self, jmp_ctx, ty, offset, expr);
+        }
+        break;
     }
 }
 
@@ -529,12 +535,12 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
     for (; head; head = head->next)
         switch (head->kind) {
         case STMT_LABEL:
-            emit_code(self, ".L%s:", head->label);
+            emit_code(self, ".L%s:\n", head->as_label.label);
             break;
         case STMT_CASE:
             if (!jmp_ctx->case_tail)
                 err("Case only allowed inside switch");
-            emit_target(self, next_case_label(self, jmp_ctx, head->case_val));
+            emit_target(self, next_case_label(self, jmp_ctx, head->as_case.value));
             break;
         case STMT_DEFAULT:
             if (!jmp_ctx->case_tail)
@@ -548,18 +554,18 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             int lelse = next_label(self);
 
             // Generate test
-            gen_bool(self, jmp_ctx, head->arg1, false, lelse);
+            gen_bool(self, jmp_ctx, head->as_if.cond, false, lelse);
 
             // Generate then
-            gen_stmts(self, jmp_ctx, head->body1);
+            gen_stmts(self, jmp_ctx, head->as_if.then_body);
 
-            if (head->body2) {
+            if (head->as_if.else_body) {
                 // If there is an else, create a jump to the end after the then
                 int lend = next_label(self);
                 emit_jump(self, "jmp", lend);
                 // Now we can generate the else body (with its target)
                 emit_target(self, lelse);
-                gen_stmts(self, jmp_ctx, head->body2);
+                gen_stmts(self, jmp_ctx, head->as_if.else_body);
                 // Add new jump target for end
                 emit_target(self, lend);
             } else {
@@ -586,12 +592,12 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             emit_jump(self, "jmp", ladder_label);
 
             // Generate body
-            gen_stmts(self, &switch_ctx, head->body1);
+            gen_stmts(self, &switch_ctx, head->as_switch.body);
             emit_jump(self, "jmp", switch_ctx.break_label);
 
             // Generate selection ladder
             emit_target(self, ladder_label);
-            gen_value(self, jmp_ctx, head->arg1);
+            gen_value(self, jmp_ctx, head->as_switch.cond);
             for (case_label_t *cur = cases; cur; cur = cur->next) {
                 emit_code(self, "cmp rax, %d\n", cur->val);
                 emit_jump(self, "je", cur->label);
@@ -614,10 +620,10 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
 
             // Generate test
             emit_target(self, loop_ctx.continue_label);
-            gen_bool(self, jmp_ctx, head->arg1, false, loop_ctx.break_label);
+            gen_bool(self, jmp_ctx, head->as_while.cond, false, loop_ctx.break_label);
 
             // Generate body
-            gen_stmts(self, &loop_ctx, head->body1);
+            gen_stmts(self, &loop_ctx, head->as_while.body);
 
             // Jump back to test
             emit_jump(self, "jmp", loop_ctx.continue_label);
@@ -636,10 +642,10 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
 
             // Generate continue target and body
             emit_target(self, loop_ctx.continue_label);
-            gen_stmts(self, &loop_ctx, head->body1);
+            gen_stmts(self, &loop_ctx, head->as_do.body);
 
             // Generate test
-            gen_bool(self, jmp_ctx, head->arg1, true, loop_ctx.continue_label);
+            gen_bool(self, jmp_ctx, head->as_do.cond, true, loop_ctx.continue_label);
             emit_target(self, loop_ctx.break_label);
             break;
         }
@@ -655,20 +661,20 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             };
 
             // Generate initialization before the loop
-            if (head->arg1)
-                gen_value(self, jmp_ctx, head->arg1);
+            if (head->as_for.init)
+                gen_value(self, jmp_ctx, head->as_for.init);
 
             // Generate test
             emit_target(self, test_label);
-            if (head->arg2)
-                gen_bool(self, jmp_ctx, head->arg2, false, loop_ctx.break_label);
+            if (head->as_for.cond)
+                gen_bool(self, jmp_ctx, head->as_for.cond, false, loop_ctx.break_label);
 
             // Generate body and increment
-            gen_stmts(self, &loop_ctx, head->body1);
+            gen_stmts(self, &loop_ctx, head->as_for.body);
 
             emit_target(self, loop_ctx.continue_label);
-            if (head->arg3)
-                gen_value(self, jmp_ctx, head->arg3);
+            if (head->as_for.incr)
+                gen_value(self, jmp_ctx, head->as_for.incr);
 
             // Jump back to the test
             emit_jump(self, "jmp", test_label);
@@ -676,7 +682,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             break;
         }
         case STMT_GOTO:
-            emit_code(self, "jmp .L%s\n", head->label);
+            emit_code(self, "jmp .L%s\n", head->as_goto.label);
             break;
         case STMT_CONTINUE:
             if (jmp_ctx->continue_label == -1)
@@ -689,15 +695,15 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             emit_jump(self, "jmp", jmp_ctx->break_label);
             break;
         case STMT_RETURN:
-            if (head->arg1)
-                gen_value(self, jmp_ctx, head->arg1);
+            if (head->as_return.value)
+                gen_value(self, jmp_ctx, head->as_return.value);
             emit_jump(self, "jmp", jmp_ctx->return_label);
             break;
         case STMT_INIT:
-            gen_initializer(self, jmp_ctx, head->init.ty, head->init.offset, head->arg1);
+            gen_initializer(self, jmp_ctx, head->as_init.sym->ty, head->as_init.sym->offset, head->as_init.value);
             break;
         case STMT_EVAL:
-            gen_value(self, jmp_ctx, head->arg1);
+            gen_value(self, jmp_ctx, head->as_eval.value);
             break;
         default:
             ASSERT_NOT_REACHED();
@@ -726,7 +732,6 @@ static void gen_param_spill(gen_t *self, sym_t *sym, int i)
         break;
     case TY_INT:
     case TY_UINT:
-    case TY_ENUM:
         emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - sym->offset, dw[i]);
         break;
     case TY_LONG:

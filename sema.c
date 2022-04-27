@@ -9,44 +9,47 @@ memb_t *make_memb(ty_t *ty, char *name)
     return memb;
 }
 
-memb_t *pack_struct(memb_t *members, int *out_align, int *out_size)
+void define_struct(ty_t *ty, memb_t *members)
 {
+    if (ty->as_aggregate.members)
+        err("Re-definition of struct");
+
+    ty->as_aggregate.members = members;
+
     for (memb_t *memb = members; memb; memb = memb->next) {
         int memb_align = ty_align(memb->ty);
         // The highest member alignment becomes the struct's alignment
-        if (memb_align > *out_align)
-            *out_align = memb_align;
+        if (memb_align > ty->as_aggregate.align)
+            ty->as_aggregate.align = memb_align;
         // Then we align the current size to the member's alignment
         // and that becomes the member's offset
-        *out_size = align(*out_size, memb_align);
-        memb->offset = *out_size;
+        ty->as_aggregate.size = align(ty->as_aggregate.size, memb_align);
+        memb->offset = ty->as_aggregate.size;
         // Finally we increase the size by the member's size
-        *out_size += ty_size(memb->ty);
+        ty->as_aggregate.size += ty_size(memb->ty);
     }
-
     // And then the whole struct's size must be aligned to be a multiple
     // of it's own alignment
-    *out_size = align(*out_size, *out_align);
-
-    return members;
+    ty->as_aggregate.size = align(ty->as_aggregate.size, ty->as_aggregate.align);
 }
 
-memb_t *pack_union(memb_t *members, int *out_align, int *out_size)
+void define_union(ty_t *ty, memb_t *members)
 {
+    if (ty->as_aggregate.members)
+        err("Re-definition of union");
+
+    ty->as_aggregate.members = members;
+
     for (memb_t *memb = members; memb; memb = memb->next) {
         int memb_align = ty_align(memb->ty);
         int memb_size = ty_size(memb->ty);
-
         // The highest member alignment becomes the union's alignment
-        if (memb_align > *out_align)
-            *out_align = memb_align;
-
+        if (memb_align > ty->as_aggregate.align)
+            ty->as_aggregate.align = memb_align;
         // The highest member size becomes the union's size
-        if (memb_size > *out_size)
-            *out_size = memb_size;
+        if (memb_size > ty->as_aggregate.size)
+            ty->as_aggregate.size = memb_size;
     }
-
-    return members;
 }
 
 param_t *make_param(ty_t *ty, sym_t *sym)
@@ -64,13 +67,6 @@ ty_t *make_ty(int kind)
     ty_t *ty = calloc(1, sizeof *ty);
     if (!ty) abort();
     ty->kind = kind;
-    return ty;
-}
-
-ty_t *make_ty_tag(int kind, tag_t *tag)
-{
-    ty_t *ty = make_ty(kind);
-    ty->tag = tag;
     return ty;
 }
 
@@ -103,18 +99,15 @@ ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var)
     return ty;
 }
 
-static void print_members(tag_t *tag)
+static void print_members(memb_t *members)
 {
-    assert(tag->defined);
     printf(" { ");
-    tag->defined = false;   // Prevent runaway recursion
-    for (memb_t *memb = tag->members; memb; memb = memb->next) {
+    for (memb_t *memb = members; memb; memb = memb->next) {
         print_ty(memb->ty);
         if (memb->name)
             printf(" %s", memb->name);
         printf("; ");
     }
-    tag->defined = true;
     printf("}");
 }
 
@@ -139,28 +132,23 @@ void print_ty(ty_t *ty)
     case TY_BOOL:       printf("_Bool");                break;
 
     case TY_STRUCT:
-        if (ty->tag->name)
-            printf("struct %s", ty->tag->name);
-        else
+        if (ty->as_aggregate.name) {
+            printf("struct %s", ty->as_aggregate.name);
+        } else {
             printf("struct");
-        if (ty->tag->defined)
-            print_members(ty->tag);
+            assert(ty->as_aggregate.members);
+            print_members(ty->as_aggregate.members);
+        }
         break;
 
     case TY_UNION:
-        if (ty->tag->name)
-            printf("union %s", ty->tag->name);
-        else
+        if (ty->as_aggregate.name) {
+            printf("union %s", ty->as_aggregate.name);
+        } else {
             printf("union");
-        if (ty->tag->defined)
-            print_members(ty->tag);
-        break;
-
-    case TY_ENUM:
-        if (ty->tag->name)
-            printf("enum %s", ty->tag->name);
-        else
-            printf("enum");
+            assert(ty->as_aggregate.members);
+            print_members(ty->as_aggregate.members);
+        }
         break;
 
     case TY_POINTER:
@@ -219,12 +207,8 @@ int ty_align(ty_t *ty)
 
     case TY_STRUCT:
     case TY_UNION:
-        assert(ty->tag->defined);
-        return ty->tag->align;
-
-    case TY_ENUM:
-        assert(ty->tag->defined);
-        return 4;
+        assert(ty->as_aggregate.members);
+        return ty->as_aggregate.align;
 
     case TY_POINTER:
         return 8;
@@ -258,12 +242,8 @@ int ty_size(ty_t *ty)
 
     case TY_STRUCT:
     case TY_UNION:
-        assert(ty->tag->defined);
-        return ty->tag->size;
-
-    case TY_ENUM:
-        assert(ty->tag->defined);
-        return 4;
+        assert(ty->as_aggregate.members);
+        return ty->as_aggregate.size;
 
     case TY_POINTER:
         return 8;
@@ -297,42 +277,14 @@ void sema_enter(sema_t *self)
 {
     scope_t *scope = calloc(1, sizeof *scope);
     if (!scope) abort();
-
-    // Replace current scope with the new scope
     scope->parent = self->scope;
     self->scope = scope;
 }
 
 void sema_exit(sema_t *self)
 {
-    // Replace current scope with parent
     scope_t *scope = self->scope;
     self->scope = scope->parent;
-
-    // Free symbols
-    // for (sym_t *sym = scope->syms; sym; ) {
-    //     sym_t *tmp = sym->next;
-    //     if (sym->kind != SYM_ENUM_CONST)
-    //         free_ty(sym->ty);
-    //     free(sym->name);
-    //     free(sym);
-    //     sym = tmp;
-    // }
-
-    // FIXME: Free tags, use refcounting
-    // We cannot actually do this for now, because we will get use
-    // after frees in the code generator
-    // for (tag_t *tag = scope->tags; tag; ) {
-    //     tag_t *tmp = tag->next;
-    //     free(tag->name);
-    //     if (tag->members)
-    //         free_members(tag->members);
-    //     free(tag);
-    //     tag = tmp;
-    // }
-
-    // Free scope
-    free(scope);
 }
 
 void sema_push(sema_t *self, scope_t *scope)
@@ -469,65 +421,61 @@ ty_t *sema_findtypedef(sema_t *self, const char *name)
     return NULL;
 }
 
-static tag_t *create_tag(sema_t *self, int kind, const char *name)
+static void create_tag(sema_t *self, ty_t *ty)
 {
     tag_t *tag = calloc(1, sizeof *tag);
     if (!tag) abort();
     tag->next = self->scope->tags;
     self->scope->tags = tag;
-    tag->kind = kind;
-    tag->name = name ? strdup(name) : NULL;
-    return tag;
+    tag->ty = ty;
 }
 
-tag_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
+ty_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
 {
     // Look for tags in any scope
     tag_t *tag = NULL;
-
-    if (name)
-        for (scope_t *scope = self->scope; scope; scope = scope->parent)
-            for (tag = scope->tags; tag; tag = tag->next)
-                if (tag->name && !strcmp(tag->name, name))
-                    goto found;
+    for (scope_t *scope = self->scope; scope; scope = scope->parent)
+        for (tag = scope->tags; tag; tag = tag->next)
+            if (!strcmp(tag->ty->as_aggregate.name, name))
+                goto found;
 found:
 
     if (tag) {
-        // If there was forward declaration or definition in any scope, use that
-        if (tag->kind != kind)
+        // Make sure the right keyword is used to refer to the tag
+        if (tag->ty->kind != kind)
             err("Tag referred to with the wrong keyword");
+        // Return the type associated with the tag we found
+        return tag->ty;
     } else {
-        // Create the in the tag current scope
-        return create_tag(self, kind, name);
+        // If no tag was found, we create one in the current scope
+        ty_t *ty = make_ty(kind);
+        ty->as_aggregate.name = strdup(name);
+        create_tag(self, ty);
+        return ty;
     }
-
-    return tag;
 }
 
-tag_t *sema_define_tag(sema_t *self, int kind, const char *name)
+ty_t *sema_define_tag(sema_t *self, int kind, const char *name)
 {
     // Look for tags just in the current scope
     tag_t *tag = NULL;
-
-    if (name)
-        for (tag = self->scope->tags; tag; tag = tag->next)
-            if (tag->name && !strcmp(tag->name, name))
-                break;
+    for (tag = self->scope->tags; tag; tag = tag->next)
+        if (!strcmp(tag->ty->as_aggregate.name, name))
+            break;
 
     if (tag) {
-        // If there was a forward declaration in the current scope, use that
-        if (tag->kind != kind)
+        // Make sure the right keyword is used to refer to the tag
+        if (tag->ty->kind != kind)
             err("Tag referred to with the wrong keyword");
-        if (tag->defined)
-            err("Re-definition of tag %s", name);
+        // Return the type associated with the tag we found
+        return tag->ty;
     } else {
-        // Otherwise, create the tag in the current scope
-        tag = create_tag(self, kind, name);
+        // If no tag was found, we create one in the current scope
+        ty_t *ty = make_ty(kind);
+        ty->as_aggregate.name = strdup(name);
+        create_tag(self, ty);
+        return ty;
     }
-
-    // In either case the tag will now become a defined
-    tag->defined = true;
-    return tag;
 }
 
 static expr_t *make_expr(int kind)
@@ -560,7 +508,7 @@ expr_t *make_sym(sema_t *self, const char *name)
     case SYM_LOCAL:
         expr = make_expr(EXPR_SYM);
         expr->ty = sym->ty;
-        expr->sym = sym;
+        expr->as_sym = sym;
         break;
     case SYM_ENUM_CONST:
         expr = make_const(make_ty(TY_INT), sym->val);
@@ -570,19 +518,19 @@ expr_t *make_sym(sema_t *self, const char *name)
     return expr;
 }
 
-expr_t *make_const(ty_t *ty, val_t val)
+expr_t *make_const(ty_t *ty, val_t value)
 {
     expr_t *expr = make_expr(EXPR_CONST);
     expr->ty = ty;
-    expr->val = val;
+    expr->as_const.value = value;
     return expr;
 }
 
-expr_t *make_str_lit(const char *str)
+expr_t *make_str_lit(const char *data)
 {
     expr_t *expr = make_expr(EXPR_STR_LIT);
-    expr->ty = make_array(make_ty(TY_CHAR), strlen(str) + 1);
-    expr->str = strdup(str);
+    expr->ty = make_array(make_ty(TY_CHAR), strlen(data) + 1);
+    expr->as_str_lit.data = strdup(data);
     return expr;
 }
 
@@ -590,10 +538,8 @@ static int find_memb(ty_t *ty, const char *name, ty_t **out)
 {
     if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
         return -1;
-    if (!ty->tag->defined)
-        return -1;
 
-    for (memb_t *memb = ty->tag->members; memb; memb = memb->next) {
+    for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
         if (!memb->name) {
             int result = find_memb(memb->ty, name, out);
             if (result != -1) {
@@ -608,14 +554,13 @@ static int find_memb(ty_t *ty, const char *name, ty_t **out)
     return -1;
 }
 
-expr_t *make_memb_expr(expr_t *arg1, const char *name)
+expr_t *make_memb_expr(expr_t *aggr, const char *name)
 {
     expr_t *expr = make_expr(EXPR_MEMB);
-    expr->arg1 = arg1;
-
-    expr->offset = find_memb(arg1->ty, name, &expr->ty);
-    if (expr->offset == -1)
-        err("Non-existent member %s of type %T", name, arg1->ty);
+    expr->as_memb.aggr = aggr;
+    expr->as_memb.offset = find_memb(aggr->ty, name, &expr->ty);
+    if (expr->as_memb.offset == -1)
+        err("Non-existent member %s of type %T", name, aggr->ty);
     return expr;
 }
 
@@ -634,22 +579,22 @@ static ty_t *find_ptr_base(ty_t *ty)
         return NULL;
 }
 
-expr_t *make_unary(int kind, expr_t *arg1)
+expr_t *make_unary(int kind, expr_t *arg)
 {
-    #define FOLD_ARITH(op)                          \
-        do {                                        \
-            arg1->val = op arg1->val;               \
-            return arg1;                            \
+    #define FOLD_ARITH(op)                                  \
+        do {                                                \
+            arg->as_const.value = op arg->as_const.value;   \
+            return arg;                                     \
         } while (0)
 
-    #define FOLD_LOGIC(op)                          \
-        do {                                        \
-            arg1->ty = make_ty(TY_INT);             \
-            arg1->val = op arg1->val;               \
-            return arg1;                            \
+    #define FOLD_LOGIC(op)                                  \
+        do {                                                \
+            arg->ty = make_ty(TY_INT);                      \
+            arg->as_const.value = op arg->as_const.value;   \
+            return arg;                                     \
         } while (0)
 
-    if (arg1->kind == EXPR_CONST)
+    if (arg->kind == EXPR_CONST)
         switch (kind) {
         case EXPR_NEG:  FOLD_ARITH(-);
         case EXPR_NOT:  FOLD_ARITH(~);
@@ -663,37 +608,31 @@ expr_t *make_unary(int kind, expr_t *arg1)
     case EXPR_REF:
     {
         expr_t *expr = make_expr(kind);
-        expr->ty = make_pointer(arg1->ty);
-        expr->arg1 = arg1;
+        expr->ty = make_pointer(arg->ty);
+        expr->as_unary.arg = arg;
         return expr;
     }
     case EXPR_DREF:
     {
         expr_t *expr = make_expr(kind);
-        if (!(expr->ty = find_ptr_base(arg1->ty)))
+        if (!(expr->ty = find_ptr_base(arg->ty)))
             err("Pointer type required");
-        expr->arg1 = arg1;
+        expr->as_unary.arg = arg;
         return expr;
     }
     case EXPR_NEG:
     case EXPR_NOT:
     {
         expr_t *expr = make_expr(kind);
-        expr->ty = arg1->ty;
-        expr->arg1 = arg1;
+        expr->ty = arg->ty;
+        expr->as_unary.arg = arg;
         return expr;
     }
     case EXPR_LNOT:
     {
         expr_t *expr = make_expr(kind);
         expr->ty = make_ty(TY_INT);
-        expr->arg1 = arg1;
-        return expr;
-    }
-    case EXPR_INIT:
-    {
-        expr_t *expr = make_expr(kind);
-        expr->arg1 = arg1;
+        expr->as_unary.arg = arg;
         return expr;
     }
     default:
@@ -705,8 +644,8 @@ static expr_t *make_ptradd(ty_t *base_ty, expr_t *ptr, expr_t *idx)
 {
     expr_t *expr = make_expr(EXPR_ADD);
     expr->ty = make_pointer(base_ty);
-    expr->arg1 = ptr;
-    expr->arg2 = make_binary(EXPR_MUL, idx,
+    expr->as_binary.lhs = ptr;
+    expr->as_binary.rhs = make_binary(EXPR_MUL, idx,
         make_const(make_ty(TY_ULONG), ty_size(base_ty)));
     return expr;
 }
@@ -715,28 +654,30 @@ static expr_t *make_ptrsub(ty_t *base_ty, expr_t *ptr1, expr_t *ptr2)
 {
     expr_t *expr = make_expr(EXPR_SUB);
     expr->ty = make_ty(TY_LONG);
-    expr->arg1 = ptr1;
-    expr->arg1 = ptr2;
+    expr->as_binary.lhs = ptr1;
+    expr->as_binary.rhs = ptr2;
     return make_binary(EXPR_DIV, expr,
         make_const(make_ty(TY_INT), ty_size(base_ty)));
 }
 
-expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
+expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
 {
-    #define FOLD_ARITH(op)                      \
-        do {                                    \
-            arg1->val = arg1->val op arg2->val; \
-            return arg1;                        \
+    #define FOLD_ARITH(op)                                  \
+        do {                                                \
+            lhs->as_const.value =                           \
+                lhs->as_const.value op rhs->as_const.value; \
+            return lhs;                                     \
         } while (0)
 
-    #define FOLD_LOGIC(op)                      \
-        do {                                    \
-            arg1->ty = make_ty(TY_INT);         \
-            arg1->val = arg1->val op arg2->val; \
-            return arg1;                        \
+    #define FOLD_LOGIC(op)                                  \
+        do {                                                \
+            lhs->ty = make_ty(TY_INT);                      \
+            lhs->as_const.value =                           \
+                lhs->as_const.value op rhs->as_const.value; \
+            return lhs;                                     \
         } while (0)
 
-    if (arg1->kind == EXPR_CONST && arg2->kind == EXPR_CONST)
+    if (lhs->kind == EXPR_CONST && rhs->kind == EXPR_CONST)
         switch (kind) {
         case EXPR_MUL:  FOLD_ARITH(*);
         case EXPR_DIV:  FOLD_ARITH(/);
@@ -764,32 +705,32 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     switch (kind) {
     case EXPR_CALL:
     {
-        ty_t *func_ty = find_ptr_base(arg1->ty);
+        ty_t *func_ty = find_ptr_base(lhs->ty);
         if (!func_ty || func_ty->kind != TY_FUNCTION)
             err("Non-function object called");
 
         expr_t *expr = make_expr(kind);
         expr->ty = func_ty->function.ret_ty;
-        expr->arg1 = arg1;
-        expr->arg2 = arg2;
+        expr->as_binary.lhs = lhs;
+        expr->as_binary.rhs = rhs;
         return expr;
     }
 
     case EXPR_ADD:
     {
         ty_t *base_ty;
-        if ((base_ty = find_ptr_base(arg1->ty)))
-            return make_ptradd(base_ty, arg1, arg2);
-        if ((base_ty = find_ptr_base(arg2->ty)))
-            return make_ptradd(base_ty, arg2, arg1);
+        if ((base_ty = find_ptr_base(lhs->ty)))
+            return make_ptradd(base_ty, lhs, rhs);
+        if ((base_ty = find_ptr_base(rhs->ty)))
+            return make_ptradd(base_ty, lhs, rhs);
         goto make_arith;
     }
 
     case EXPR_SUB:
     {
         ty_t *base_ty1, *base_ty2;
-        if ((base_ty1 = find_ptr_base(arg1->ty)) && (base_ty2 = find_ptr_base(arg2->ty)))
-            return make_ptrsub(base_ty1, arg1, arg2);
+        if ((base_ty1 = find_ptr_base(lhs->ty)) && (base_ty2 = find_ptr_base(rhs->ty)))
+            return make_ptrsub(base_ty1, lhs, rhs);
         goto make_arith;
     }
 
@@ -804,9 +745,9 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     make_arith:
     {
         expr_t *expr = make_expr(kind);
-        expr->ty = arg1->ty;
-        expr->arg1 = arg1;
-        expr->arg2 = arg2;
+        expr->ty = lhs->ty;
+        expr->as_binary.lhs = lhs;
+        expr->as_binary.rhs = rhs;
         return expr;
     }
 
@@ -821,8 +762,8 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     {
         expr_t *expr = make_expr(kind);
         expr->ty = make_ty(TY_INT);
-        expr->arg1 = arg1;
-        expr->arg2 = arg2;
+        expr->as_binary.lhs = lhs;
+        expr->as_binary.rhs = rhs;
         return expr;
     }
 
@@ -830,9 +771,9 @@ expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2)
     case EXPR_SEQ:
     {
         expr_t *expr = make_expr(kind);
-        expr->ty = arg2->ty;
-        expr->arg1 = arg1;
-        expr->arg2 = arg2;
+        expr->ty = rhs->ty;
+        expr->as_binary.lhs = lhs;
+        expr->as_binary.rhs = rhs;
         return expr;
     }
 
@@ -848,11 +789,11 @@ expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
     expr->ty = arg2->ty;
 
     if (arg1->kind == EXPR_CONST)
-        return arg1->val ? arg2 : arg3;
+        return arg1->as_const.value ? arg2 : arg3;
 
-    expr->arg1 = arg1;
-    expr->arg2 = arg2;
-    expr->arg3 = arg3;
+    expr->as_trinary.arg1 = arg1;
+    expr->as_trinary.arg2 = arg2;
+    expr->as_trinary.arg3 = arg3;
     return expr;
 }
 
@@ -865,12 +806,19 @@ expr_t *make_stmt_expr(stmt_t *body)
     while (last->next)
         last = last->next;
     if (last && last->kind == STMT_EVAL)
-        expr->ty = last->arg1->ty;
+        expr->ty = last->as_eval.value->ty;
     else
         expr->ty = make_ty(TY_VOID);
 
-    expr->body = body;
+    expr->as_stmt = body;
     return expr;
+}
+
+init_t *make_init(void)
+{
+    init_t *init = calloc(1, sizeof *init);
+    if (!init) abort();
+    return init;
 }
 
 stmt_t *make_stmt(int kind)

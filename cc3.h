@@ -210,30 +210,8 @@ struct memb {
 };
 
 memb_t *make_memb(ty_t *ty, char *name);
-memb_t *pack_struct(memb_t *members, int *out_align, int *out_size);
-memb_t *pack_union(memb_t *members, int *out_align, int *out_size);
-
-enum {
-    TAG_STRUCT,
-    TAG_UNION,
-    TAG_ENUM,
-};
-
-typedef struct tag tag_t;
-
-struct tag {
-    tag_t *next;
-
-    int kind;
-
-    char *name;         // Name (can be NULL if untagged)
-    bool defined;       // Is this type actuall defined?
-
-
-    memb_t *members;    // Struct/union members
-    int align;          // Struct/union alignment
-    int size;           // Struct/union size
-};
+void define_struct(ty_t *ty, memb_t *members);
+void define_union(ty_t *ty, memb_t *members);
 
 typedef struct param param_t;
 typedef struct sym sym_t;
@@ -266,7 +244,6 @@ enum {
     TY_BOOL,
     TY_STRUCT,
     TY_UNION,
-    TY_ENUM,
     TY_POINTER,
     TY_ARRAY,
     TY_FUNCTION,
@@ -278,7 +255,12 @@ struct ty {
     int kind;
 
     union {
-        tag_t *tag;
+        struct {
+            char *name;
+            memb_t *members;
+            int align;
+            int size;
+        } as_aggregate;
 
         struct {
             ty_t *base_ty;
@@ -299,7 +281,6 @@ struct ty {
 };
 
 ty_t *make_ty(int kind);
-ty_t *make_ty_tag(int kind, tag_t *tag);
 ty_t *make_pointer(ty_t *base_ty);
 ty_t *make_array(ty_t *elem_ty, int cnt);
 ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var);
@@ -331,6 +312,14 @@ struct sym {
 
     int offset;
     val_t val;
+};
+
+typedef struct tag tag_t;
+
+struct tag {
+    tag_t *next;
+
+    ty_t *ty;
 };
 
 struct scope {
@@ -369,9 +358,9 @@ sym_t *sema_lookup(sema_t *self, const char *name);
 ty_t *sema_findtypedef(sema_t *self, const char *name);
 
 // Forward declare a tag
-tag_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name);
+ty_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name);
 // Define a tag
-tag_t *sema_define_tag(sema_t *self, int kind, const char *name);
+ty_t *sema_define_tag(sema_t *self, int kind, const char *name);
 
 
 /** Expressions **/
@@ -379,8 +368,10 @@ tag_t *sema_define_tag(sema_t *self, int kind, const char *name);
 enum {
     // Symbol
     EXPR_SYM,
+
     // Constant
     EXPR_CONST,
+
     // String literal
     EXPR_STR_LIT,
 
@@ -418,8 +409,6 @@ enum {
     EXPR_COND,  // Conditional
     EXPR_SEQ,   // Comma operator
 
-    EXPR_INIT,  // Initializer list
-
     EXPR_STMT,  // [GNU] Statement expression
 };
 
@@ -431,32 +420,76 @@ struct expr {
 
     int kind;
 
-    // Type
     ty_t *ty;
 
-    // Value
-    int offset;
-    sym_t *sym;
-    char *str;
-    val_t val;
+    union {
+        sym_t *as_sym;
 
-    // Arguments
-    expr_t *arg1, *arg2, *arg3;
-    // Body of a statement expression
-    stmt_t *body;
+        struct {
+            val_t value;
+        } as_const;
+
+        struct {
+            char *data;
+        } as_str_lit;
+
+        struct {
+            expr_t *aggr;
+            int offset;
+        } as_memb;
+
+        struct {
+            expr_t *arg;
+        } as_unary;
+
+        struct {
+            expr_t *lhs;
+            expr_t *rhs;
+        } as_binary;
+
+        struct {
+            expr_t *arg1;
+            expr_t *arg2;
+            expr_t *arg3;
+        } as_trinary;
+
+        stmt_t *as_stmt;
+    };
 };
 
 expr_t *make_sym(sema_t *self, const char *name);
-expr_t *make_const(ty_t *ty, val_t val);
+expr_t *make_const(ty_t *ty, val_t value);
 expr_t *make_str_lit(const char *str);
 
-expr_t *make_memb_expr(expr_t *arg1, const char *name);
+expr_t *make_memb_expr(expr_t *aggr, const char *name);
 
-expr_t *make_unary(int kind, expr_t *arg1);
-expr_t *make_binary(int kind, expr_t *arg1, expr_t *arg2);
+expr_t *make_unary(int kind, expr_t *arg);
+expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs);
 expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3);
 
 expr_t *make_stmt_expr(stmt_t *body);
+
+/** Initializer **/
+
+enum {
+    INIT_EXPR,
+    INIT_LIST,
+};
+
+typedef struct init init_t;
+
+struct init {
+    init_t *next;
+
+    int kind;
+
+    union {
+        expr_t *as_expr;
+        init_t *as_list;
+    };
+};
+
+init_t *make_init(void);
 
 /** Statements **/
 
@@ -473,8 +506,8 @@ enum {
     STMT_CONTINUE,
     STMT_BREAK,
     STMT_RETURN,
-    STMT_INIT,
     STMT_EVAL,
+    STMT_INIT,
 };
 
 struct stmt {
@@ -482,16 +515,39 @@ struct stmt {
 
     int kind;
 
-    const char *label;          // Goto label
-    int case_val;               // Case label
+    union {
+        struct {
+            char *label;
+        } as_label, as_goto;
 
-    struct {                    // Initializer
-        ty_t *ty;
-        int offset;
-    } init;
-    
-    expr_t *arg1, *arg2, *arg3; // Expression arguments
-    stmt_t *body1, *body2;      // Statement list arguments
+        struct {
+            int value;
+        } as_case;
+
+        struct {
+            expr_t *cond;
+            stmt_t *then_body, *else_body;
+        } as_if;
+
+        struct {
+            expr_t *cond;
+            stmt_t *body;
+        } as_switch, as_while, as_do;
+
+        struct {
+            expr_t *init, *cond, *incr;
+            stmt_t *body;
+        } as_for;
+
+        struct {
+            expr_t *value;
+        } as_return, as_eval;
+
+        struct {
+            sym_t *sym;
+            init_t *value;
+        } as_init;
+    };
 };
 
 stmt_t *make_stmt(int kind);
