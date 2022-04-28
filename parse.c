@@ -74,8 +74,17 @@ expr_t *primary_expression(cc3_t *self)
         expr = make_const(make_ty(TY_INT), tk->val);
         break;
     case TK_STR_LIT:
-        expr = make_str_lit(tk->str.data);
-        break;
+        {
+            // NOTE: this is a little hacky
+            string_t s;
+            string_init(&s);
+            string_printf(&s, "%s", tk->str.data);
+            while ((tk = maybe_want(self, TK_STR_LIT)))
+                string_printf(&s, "%s", tk->str.data);
+            expr = make_str_lit(s.data);
+            string_free(&s);
+            break;
+        }
     case TK_LPAREN:
         if (maybe_want(self, TK_LCURLY)) {  // [GNU]: statement expressions
             stmt_t *body = read_block(self);
@@ -127,11 +136,16 @@ expr_t *postfix_expression(cc3_t *self)
             continue;
         }
         if (maybe_want(self, TK_INCR)) {
-            ASSERT_NOT_REACHED();               // FIXME
+            // FIXME: this isn't exactly the best way to do this
+            expr = make_binary(EXPR_SUB, make_binary(EXPR_AS, expr,
+                make_binary(EXPR_ADD, expr, make_const(make_ty(TY_INT), 1))),
+                make_const(make_ty(TY_INT), 1));
             continue;
         }
         if (maybe_want(self, TK_DECR)) {
-            ASSERT_NOT_REACHED();               // FIXME
+            expr = make_binary(EXPR_ADD, make_binary(EXPR_AS, expr,
+                make_binary(EXPR_SUB, expr, make_const(make_ty(TY_INT), 1))),
+                make_const(make_ty(TY_INT), 1));
             continue;
         }
         // FIXME: recognize compound literals here
@@ -1044,17 +1058,16 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
 
             if (maybe_want(self, TK_AS)) {
                 // Read initializer
-                init_t *init = initializer(self);
+                init_t *init = bind_init(sym->ty, initializer(self));
 
                 // Add local initialization "statement" if the target is local
                 if (sym->kind == SYM_LOCAL) {
                     stmt_t *stmt = make_stmt(STMT_INIT);
                     stmt->as_init.sym = sym;
-                    stmt->as_init.value = bind_init(sym->ty, init);
+                    stmt->as_init.value = init;
                     append_stmt(tail, stmt);
                 } else {
-                    // FIXME: add static data
-                    ASSERT_NOT_REACHED();
+                    gen_static(&self->gen, sym, init);
                 }
             }
 

@@ -303,14 +303,21 @@ enum {
 struct sym {
     sym_t *next;
 
+    // Symbol kind
     int kind;
 
+    // Declared type and name
     ty_t *ty;
     char *name;
 
-    bool had_def;
+    // Assembler symbol name
+    char *asm_name;
 
+    // Was this defined or just declared (for SYM_EXTERN)
+    bool had_def;
+    // Offset of the storage on the stack (for SYM_LOCAL)
     int offset;
+    // Constant value of the symbol (for SYM_ENUM_CONST)
     val_t val;
 };
 
@@ -334,6 +341,9 @@ typedef struct sema sema_t;
 
 struct sema {
     scope_t *scope;
+
+    // Block scope static count
+    int block_static_cnt;
 
     // HACK: current function specific stuff
     const char *func_name;
@@ -570,11 +580,12 @@ struct gen {
     // Output code and data
     string_t code;
     string_t data;
+    string_t lits;
 };
 
 void gen_init(gen_t *self);
 void gen_free(gen_t *self);
-char *gen_str_lit(gen_t *self, tk_t *tk);
+void gen_static(gen_t *self, sym_t *sym, init_t *init);
 void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body);
 
 /** Parser **/

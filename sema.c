@@ -262,6 +262,8 @@ void sema_init(sema_t *self)
     self->scope = NULL;
     sema_enter(self);
 
+    self->block_static_cnt = 0;
+
     // FIXME: declare the real type of this
     sema_declare(self, TK_TYPEDEF,
         make_pointer(make_ty(TY_VOID)),
@@ -371,6 +373,16 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
 
     sym->ty = ty;
     sym->name = name;
+
+    // Create unique assembler name for block scope static
+    if (sym->kind == SYM_STATIC && self->scope->parent) {
+        string_t s;
+        string_init(&s);
+        string_printf(&s, "%s$%d", sym->name, self->block_static_cnt++);
+        sym->asm_name = s.data;
+    } else {
+        sym->asm_name = sym->name;
+    }
 
     return sym;
 }

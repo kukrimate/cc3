@@ -18,6 +18,7 @@ static void cc3_write_asm(cc3_t *ctx, FILE *output_file)
 {
     // Generate text and data section
     fprintf(output_file, "section .text\n%s", ctx->gen.code.data);
+    fprintf(output_file, "section .rodata\n%s", ctx->gen.lits.data);
     fprintf(output_file, "section .data\n%s", ctx->gen.data.data);
 
     // Generate imports and exports

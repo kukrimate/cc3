@@ -27,45 +27,129 @@ void gen_init(gen_t *self)
     self->str_lit_cnt = 0;
     string_init(&self->code);
     string_init(&self->data);
+    string_init(&self->lits);
 }
 
 void gen_free(gen_t *self)
 {
     string_free(&self->code);
     string_free(&self->data);
+    string_free(&self->lits);
 }
 
-static void emit_data(gen_t *self, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    string_vprintf(&self->data, fmt, ap);
-    va_end(ap);
-}
+#define emit_data(self, fmt, ...)   \
+    string_printf(&self->data, fmt __VA_OPT__(,) __VA_ARGS__)
 
-static void emit_code(gen_t *self, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    string_vprintf(&self->code, fmt, ap);
-    va_end(ap);
-}
+#define emit_code(self, fmt, ...)   \
+    string_printf(&self->code, fmt __VA_OPT__(,) __VA_ARGS__)
 
-static void emit_str_lit(gen_t *self, const char *s)
+static int emit_str_lit(gen_t *self, const char *s)
 {
     // Create global index for literal
     int idx = self->str_lit_cnt++;
 
     // Emit name
-    emit_data(self, "str$%d db ", idx);
+    string_printf(&self->lits, "str$%d db ", idx);
     // Emit chars
     while (*s)
-        emit_data(self, "%02Xh, ", *s++);
+        string_printf(&self->lits, "%02Xh, ", *s++);
     // Emit NUL
-    emit_data(self, "0\n");
+    string_printf(&self->lits, "0\n");
 
     // Emit reference in code
-    emit_code(self, "mov rax, str$%d\n", idx);
+    return idx;
+}
+
+static const char *ty_data_word(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:
+    case TY_BOOL:
+        return "db";
+
+    case TY_SHORT:
+    case TY_USHORT:
+        return "dw";
+
+    case TY_INT:
+    case TY_UINT:
+        return "dd";
+
+    case TY_LONG:
+    case TY_ULONG:
+    case TY_LLONG:
+    case TY_ULLONG:
+    case TY_POINTER:
+        return "dq";
+
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
+{
+    switch (ty->kind) {
+    case TY_STRUCT:
+        assert(init->kind == INIT_LIST);
+        init = init->as_list;
+        for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
+            gen_static_initializer(self, memb->ty, init);
+            init = init->next;
+            if (memb->next)                             // Middle padding
+                emit_data(self, "align %d\n", ty_align(memb->next->ty));
+        }
+        emit_data(self, "align %d\n", ty_align(ty));    // End padding
+        break;
+
+    case TY_UNION:
+        assert(init->kind == INIT_LIST);
+        init = init->as_list;
+        gen_static_initializer(self, ty->as_aggregate.members->ty, init);
+        emit_data(self, "align %d\n", ty_align(ty));    // End padding
+        break;
+
+    case TY_ARRAY:
+        assert(init->kind == INIT_LIST);
+        init = init->as_list;
+        for (int i = 0; i < ty->array.cnt; ++i) {
+            gen_static_initializer(self, ty->array.elem_ty, init);
+            init = init->next;
+        }
+        break;
+
+    default:
+        assert(init->kind == INIT_EXPR);
+        switch (init->as_expr->kind) {
+        case EXPR_SYM:
+            emit_data(self, "%s %s\n", ty_data_word(ty),
+                init->as_expr->as_sym->asm_name);
+            break;
+        case EXPR_CONST:
+            emit_data(self, "%s %s\n", ty_data_word(ty),
+                init->as_expr->as_const.value);
+            break;
+        case EXPR_STR_LIT:
+            emit_data(self, "%s str$%d\n", ty_data_word(ty),
+                emit_str_lit(self, init->as_expr->as_str_lit.data));
+            break;
+        default:
+            err("Constant expression required");
+        }
+        break;
+    }
+}
+
+void gen_static(gen_t *self, sym_t *sym, init_t *init)
+{
+    emit_data(self,
+        "%s:\n"
+        "align %d\n",
+        sym->asm_name,
+        ty_align(sym->ty));
+    gen_static_initializer(self, sym->ty, init);
 }
 
 static int next_label(gen_t *self)
@@ -107,13 +191,15 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
                 sym_t *sym = expr->as_sym;
 
                 if (sym->kind == SYM_LOCAL)
-                    emit_code(self, "lea rax, [rbp - %d]\n", self->offset - sym->offset);
+                    emit_code(self, "lea rax, [rbp - %d]\n",
+                                self->offset - sym->offset);
                 else
-                    emit_code(self, "mov rax, %s\n", sym->name);
+                    emit_code(self, "mov rax, %s\n", sym->asm_name);
             }
             break;
         case EXPR_STR_LIT:
-            emit_str_lit(self, expr->as_str_lit.data);
+            emit_code(self, "mov rax, str$%d\n",
+                        emit_str_lit(self, expr->as_str_lit.data));
             break;
         case EXPR_MEMB:
             gen_addr(self, jmp_ctx, expr->as_memb.aggr);
@@ -227,6 +313,19 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
         // Do the call (zero rax for varargs)
         emit_code(self, "xor eax, eax\ncall r10\n");
+
+        // Extend smaller then wordsize return value
+        switch (expr->ty->kind) {
+        case TY_CHAR:
+        case TY_SCHAR:  emit_code(self, "movsx rax, al\n");     break;
+        case TY_UCHAR:
+        case TY_BOOL:   emit_code(self, "movzx rax, al\n");     break;
+        case TY_SHORT:  emit_code(self, "movsx rax, ax\n");     break;
+        case TY_USHORT: emit_code(self, "movzx rax, ax\n");     break;
+        case TY_INT:    emit_code(self, "movsx rax, eax\n");    break;
+        case TY_UINT:   emit_code(self, "movzx rax, eax\n");    break;
+        }
+
         break;
     }
 
@@ -535,11 +634,11 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
 
             int ladder_label = next_label(self);
             jmp_ctx_t switch_ctx = {
-                .return_label = jmp_ctx->return_label,
-                .continue_label = jmp_ctx->continue_label,
-                .break_label = next_label(self),
-                .case_tail = &cases,
-                .default_label = -1,
+                jmp_ctx->return_label,
+                jmp_ctx->continue_label,
+                next_label(self),
+                &cases,
+                -1,
             };
 
             // Jump to selection ladder
@@ -565,11 +664,11 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         case STMT_WHILE:
         {
             jmp_ctx_t loop_ctx = {
-                .return_label = jmp_ctx->return_label,
-                .continue_label = next_label(self),
-                .break_label = next_label(self),
-                .case_tail = jmp_ctx->case_tail,
-                .default_label = jmp_ctx->default_label,
+                jmp_ctx->return_label,
+                next_label(self),
+                next_label(self),
+                jmp_ctx->case_tail,
+                jmp_ctx->default_label,
             };
 
             // Generate test
@@ -587,11 +686,11 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         case STMT_DO:
         {
             jmp_ctx_t loop_ctx = {
-                .return_label = jmp_ctx->return_label,
-                .continue_label = next_label(self),
-                .break_label = next_label(self),
-                .case_tail = jmp_ctx->case_tail,
-                .default_label = jmp_ctx->default_label,
+                jmp_ctx->return_label,
+                next_label(self),
+                next_label(self),
+                jmp_ctx->case_tail,
+                jmp_ctx->default_label,
             };
 
             // Generate continue target and body
@@ -607,11 +706,11 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         {
             int test_label = next_label(self);
             jmp_ctx_t loop_ctx = {
-                .return_label = jmp_ctx->return_label,
-                .continue_label = next_label(self),
-                .break_label = next_label(self),
-                .case_tail = jmp_ctx->case_tail,
-                .default_label = jmp_ctx->default_label,
+                jmp_ctx->return_label,
+                next_label(self),
+                next_label(self),
+                jmp_ctx->case_tail,
+                jmp_ctx->default_label,
             };
 
             // Generate initialization before the loop
@@ -708,7 +807,7 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
         "push rbp\n"
         "mov rbp, rsp\n"
         "sub rsp, %d\n",
-        sym->name,
+        sym->asm_name,
         self->offset = align(offset, 16));
 
     // Setup function specific values
@@ -721,13 +820,7 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
         gen_param_spill(self, param->sym, param_i++);
 
     // Generate body
-    jmp_ctx_t func_ctx = {
-        .return_label = next_label(self),
-        .continue_label = -1,
-        .break_label = -1,
-        .case_tail = NULL,
-        .default_label = -1,
-    };
+    jmp_ctx_t func_ctx = { next_label(self), -1, -1, NULL, -1 };
     gen_stmts(self, &func_ctx, body);
 
     // Generate exit sequence
