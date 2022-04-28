@@ -406,24 +406,16 @@ static bool end_comma_separated(cc3_t *self)
 
 static init_t *initializer(cc3_t *self)
 {
-    init_t *init = make_init();
-
-    // FIXME: implement these
-    // designation(self);
-
     if (maybe_want(self, TK_LCURLY)) {
-        init->kind = INIT_LIST;
-        init_t **tail = &init->as_list;
+        init_t *head, **tail = &head;
         do {
             *tail = initializer(self);
             tail = &(*tail)->next;
         } while (!end_comma_separated(self));
+        return make_init_list(head);
     } else {
-        init->kind = INIT_EXPR;
-        init->as_expr = assignment_expression(self);
+        return make_init_expr(assignment_expression(self));
     }
-
-    return init;
 }
 
 /** Declarations **/
@@ -1053,17 +1045,21 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
             if (maybe_want(self, TK_AS)) {
                 // Read initializer
                 init_t *init = initializer(self);
+
                 // Add local initialization "statement" if the target is local
-                if (sym->offset != -1) {
+                if (sym->kind == SYM_LOCAL) {
                     stmt_t *stmt = make_stmt(STMT_INIT);
                     stmt->as_init.sym = sym;
-                    stmt->as_init.value = init;
+                    stmt->as_init.value = bind_init(sym->ty, init);
                     append_stmt(tail, stmt);
                 } else {
                     // FIXME: add static data
                     ASSERT_NOT_REACHED();
                 }
             }
+
+            sema_declare_end(&self->sema, sym);
+
         } while (maybe_want(self, TK_COMMA));
         // Declarators must end with ;
         want(self, TK_SEMICOLON);

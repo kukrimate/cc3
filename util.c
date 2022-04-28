@@ -33,6 +33,10 @@ static void vprintln(const char *fmt, va_list ap)
                 printf("%x", va_arg(ap, int));
                 break;
 
+            case 'p':
+                printf("%p", va_arg(ap, void *));
+                break;
+
             /** Custom types **/
 
             case 'S':   // string_t

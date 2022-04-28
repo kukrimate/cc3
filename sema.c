@@ -372,18 +372,18 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     sym->ty = ty;
     sym->name = name;
 
-    // Allocate local variable if required
+    return sym;
+}
+
+void sema_declare_end(sema_t *self, sym_t *sym)
+{
     if (sym->kind == SYM_LOCAL) {
         // First align the stack
-        self->offset = align(self->offset, ty_align(ty));
+        self->offset = align(self->offset, ty_align(sym->ty));
         // Then we can allocate space for the variable
         sym->offset = self->offset;
-        self->offset += ty_size(ty);
-    } else {
-        sym->offset = -1;
+        self->offset += ty_size(sym->ty);
     }
-
-    return sym;
 }
 
 sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val)
@@ -814,11 +814,223 @@ expr_t *make_stmt_expr(stmt_t *body)
     return expr;
 }
 
-init_t *make_init(void)
+static init_t *alloc_init(void)
 {
     init_t *init = calloc(1, sizeof *init);
     if (!init) abort();
     return init;
+}
+
+init_t *make_init_expr(expr_t *expr)
+{
+    init_t *init = alloc_init();
+    init->kind = INIT_EXPR;
+    init->as_expr = expr;
+    return init;
+}
+
+init_t *make_init_list(init_t *list)
+{
+    init_t *init = alloc_init();
+    init->kind = INIT_LIST;
+    init->as_list = list;
+    return init;
+}
+
+/** This section deals with the suckiness of C initializers so the code
+ *  generator doesn't have to. If you need any proof the C standard is downright
+ *  insane, filled with arcane special cases, just read this code. **/
+
+static init_t *bind_scalar(init_t **iter)
+{
+    // If we reach a member of an aggregate without an initializer, we need to
+    // zero initialize it. We make that explicit to simplify code generation.
+    if (!*iter)
+        return make_init_expr(make_const(make_ty(TY_INT), 0));
+
+    // Otherwise we consume the first initializer from the iterator.
+    init_t *init = *iter;
+    *iter = (*iter)->next;
+
+    // Then we remove any excess braces that might be present around it.
+    while (init->kind == INIT_LIST) {
+        // For each layer of braces, the initializer becomes the contents
+        init = init->as_list;
+        // We also make sure there is no trailing garbage in any layer
+        if (init->next)
+            err("Trailing garbage in scalar initializer");
+    }
+
+    return make_init_expr(init->as_expr);
+}
+
+static init_t *bind_init_r(ty_t *ty, init_t **iter, bool outer);
+
+static init_t *bind_struct(ty_t *ty, init_t **iter)
+{
+    // Build new initializer list
+    init_t *head = NULL, **tail = &head;
+
+    // Bind an initializer to each member of the struct
+    for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
+        *tail = bind_init_r(memb->ty, iter, false);
+        tail = &(*tail)->next;
+    }
+
+    // Return the new initializer list we've built
+    return make_init_list(head);
+}
+
+static init_t *bind_union(ty_t *ty, init_t **iter)
+{
+    // Like the struct initializer above, however only the first member
+    // can be initialized of an union
+    return make_init_list(bind_init_r(ty->as_aggregate.members->ty, iter, false));
+}
+
+static init_t *bind_array_str(ty_t *ty, init_t **iter)
+{
+    switch (ty->array.elem_ty->kind) {
+    case TY_CHAR:
+    case TY_SCHAR:
+    case TY_UCHAR:  // Only applies to char arrays
+        break;
+    default:        // Bail on any other type
+        goto bail;
+    }
+
+    if (!*iter)     // Or bail if there is no initializer
+        goto bail;
+
+    // Find an expression that might be enclosed in an arbitrary number of braces
+    init_t *init = *iter;
+    while (init->kind == INIT_LIST) {
+        // Look at the contents of the list
+        init = init->as_list;
+        // Bail if there is anything trailing
+        if (init->next)
+            goto bail;
+    }
+
+    // Bail if it's not a string literal
+    if (init->as_expr->kind != EXPR_STR_LIT)
+        goto bail;
+
+    // The string literal might complete the array's type
+    if (ty->array.cnt == -1)
+        ty->array.cnt = strlen(init->as_expr->as_str_lit.data) + 1;
+
+    return make_init_expr(init->as_expr);
+
+bail:
+    return NULL;
+}
+
+static init_t *bind_array(ty_t *ty, init_t **iter)
+{
+    // Otherwise build a new initializer list
+    init_t *head = NULL, **tail = &head;
+
+    if (ty->array.cnt == -1) {
+        // Bind as many initializers as we can, and count them
+        for (ty->array.cnt = 0; *iter; ++ty->array.cnt) {
+            *tail = bind_init_r(ty->array.elem_ty, iter, false);
+            tail = &(*tail)->next;
+        }
+    } else {
+        // Bind an initializer to each array element
+        for (int i = 0; i < ty->array.cnt; ++i) {
+            *tail = bind_init_r(ty->array.elem_ty, iter, false);
+            tail = &(*tail)->next;
+        }
+    }
+    // Return the new initializer list we've built
+    return make_init_list(head);
+}
+
+static init_t *bind_init_r(ty_t *ty, init_t **iter, bool outer)
+{
+    switch (ty->kind) {
+    // Struct:
+    // - a brace enclosed initializer list
+    // - consume elements from the outer initializer list
+    case TY_STRUCT:
+        if (*iter && (*iter)->kind == INIT_LIST) {
+            // Consume elements from the initializer list
+            init_t *cur = (*iter)->as_list;
+            init_t *init = bind_struct(ty, &cur);
+            if (cur)
+                err("Trailing garbage in struct initializer");
+            // Skip the initializer list we've consumed
+            *iter = (*iter)->next;
+            // Return new list
+            return init;
+        }
+
+        // Otherwise consume elements from the outer initializer list
+        if (outer)
+            err("Invalid initializer for type %T", ty);
+        return bind_struct(ty, iter);
+
+    // Union:
+    // - a brace enclosed initializer list
+    // - consume elements from the outer initializer list
+    case TY_UNION:
+        if (*iter && (*iter)->kind == INIT_LIST) {
+            // Consume elements from the initializer list
+            init_t *cur = (*iter)->as_list;
+            init_t *init = bind_union(ty, &cur);
+            if (cur)
+                err("Trailing garbage in union initializer");
+            // Only skip the initializer list we've consumed
+            *iter = (*iter)->next;
+            return init;
+        }
+
+        // Otherwise consume elements from the outer initializer list
+        if (outer)
+            err("Invalid initializer for type %T", ty);
+        return bind_union(ty, iter);
+
+    // Array:
+    // - for char arrays, a string literal, optionally in braces
+    // - a brace enclosed initializer list
+    // - consume elements from the outer initializer list
+    case TY_ARRAY:
+        if (!outer && ty->array.cnt == -1)
+            err("Only the outermost array type is allowed to be incomplete");
+
+        // First see if we found a string literal initializer
+        init_t *init = bind_array_str(ty, iter);
+        if (init)
+            return init;
+
+        if (*iter && (*iter)->kind == INIT_LIST) {
+            // Consume elements from the initializer list
+            init_t *cur = (*iter)->as_list;
+            init_t *init = bind_array(ty, &cur);
+            if (cur)
+                err("Trailing garbage in array initializer");
+            // Only skip the initializer list we've consumed
+            *iter = (*iter)->next;
+            return init;
+        }
+
+        // Otherwise consume elements from the outer initializer list
+        if (outer)
+            err("Invalid initializer for type %T", ty);
+        return bind_array(ty, iter);
+
+    // Scalar:
+    // - an expression, optionally in braces
+    default:
+        return bind_scalar(iter);
+    }
+}
+
+init_t *bind_init(ty_t *ty, init_t *init)
+{
+    return bind_init_r(ty, &init, true);
 }
 
 stmt_t *make_stmt(int kind)

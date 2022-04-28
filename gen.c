@@ -420,37 +420,30 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
     }
 }
 
-static void gen_initializer_scalar(gen_t *self, jmp_ctx_t *jmp_ctx,
-    ty_t *ty, int offset, expr_t *expr)
+static void gen_write(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offset, expr_t *expr)
 {
-    if (expr)
-        // Then generate its value
-        gen_value(self, jmp_ctx, expr);
-    else
-        // Zero initialize subobjects without an initializer
-        emit_code(self, "xor eax, eax\n");
-
+    gen_value(self, jmp_ctx, expr);
     switch (ty->kind) {
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
     case TY_BOOL:
-        emit_code(self, "mov [rbp - %d], al\n", self->offset - offset);
+        emit_code(self, "mov byte [rbp - %d], al\n", self->offset - offset);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "mov [rbp - %d], ax\n", self->offset - offset);
+        emit_code(self, "mov word [rbp - %d], ax\n", self->offset - offset);
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "mov [rbp - %d], eax\n", self->offset - offset);
+        emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "mov [rbp - %d], rax\n", self->offset - offset);
+        emit_code(self, "mov qword [rbp - %d], rax\n", self->offset - offset);
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -458,74 +451,35 @@ static void gen_initializer_scalar(gen_t *self, jmp_ctx_t *jmp_ctx,
 }
 
 static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
-    ty_t *ty, int offset, init_t *init);
-
-static void gen_initializer_aggregate(gen_t *self, jmp_ctx_t *jmp_ctx,
     ty_t *ty, int offset, init_t *init)
 {
     switch (ty->kind) {
     case TY_STRUCT:
-        // Struct initializers can initialize all entries
+        assert(init->kind == INIT_LIST);
+        init = init->as_list;
         for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
             gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, init);
-            if (init)
-                init = init->next;
+            init = init->next;
         }
         break;
     case TY_UNION:
-        {
-            // Union initializers can only initializer the first member
-            memb_t *memb = ty->as_aggregate.members;
-            gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, init);
-        }
+        assert(init->kind == INIT_LIST);
+        init = init->as_list;
+        gen_initializer(self, jmp_ctx, ty->as_aggregate.members->ty,
+            offset + ty->as_aggregate.members->offset, init);
         break;
     case TY_ARRAY:
-        {
-            // Save array element type and its size
-            ty_t *elem_ty = ty->array.elem_ty;
-            int elem_size = ty_size(elem_ty);
-
-            // Each array element can have an initializer
-            for (int i = 0; i < ty->array.cnt; ++i) {
-                gen_initializer(self, jmp_ctx, elem_ty, offset, init);
-                if (init)
-                    init = init->next;
-                offset += elem_size;
-            }
+        assert(init->kind == INIT_LIST);
+        init = init->as_list;
+        for (int i = 0; i < ty->array.cnt; ++i) {
+            gen_initializer(self, jmp_ctx, ty->array.elem_ty, offset, init);
+            init = init->next;
+            offset += ty_size(ty->array.elem_ty);
         }
         break;
     default:
-        ASSERT_NOT_REACHED();
-    }
-}
-
-static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
-    ty_t *ty, int offset, init_t *init)
-{
-    switch (ty->kind) {
-    case TY_STRUCT:
-    case TY_UNION:
-    case TY_ARRAY:
-        {
-            init_t *list = NULL;
-            if (init) {
-                if (init->kind != INIT_LIST)
-                    err("Sclar initializer provided for aggregate");
-                list = init->as_list;
-            }
-            gen_initializer_aggregate(self, jmp_ctx, ty, offset, list);
-        }
-        break;
-    default:
-        {
-            expr_t *expr = NULL;
-            if (init) {
-                if (init->kind != INIT_EXPR)
-                    err("Initializer list provided for scalar");
-                expr = init->as_expr;
-            }
-            gen_initializer_scalar(self, jmp_ctx, ty, offset, expr);
-        }
+        assert(init->kind == INIT_EXPR);
+        gen_write(self, jmp_ctx, ty, offset, init->as_expr);
         break;
     }
 }

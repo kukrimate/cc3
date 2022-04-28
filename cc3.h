@@ -350,6 +350,8 @@ scope_t *sema_pop(sema_t *self);
 
 // Declare a name
 sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name);
+// Finalize declaration after its initialize
+void sema_declare_end(sema_t *self, sym_t *sym);
 // Declare an enumeration constant
 sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val);
 // Lookup a declaration in any scope
@@ -489,7 +491,9 @@ struct init {
     };
 };
 
-init_t *make_init(void);
+init_t *make_init_expr(expr_t *expr);
+init_t *make_init_list(init_t *list);
+init_t *bind_init(ty_t *ty, init_t *init);
 
 /** Statements **/
 
