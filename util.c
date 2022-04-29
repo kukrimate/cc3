@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "cc3.h"
 
 int align(int val, int bound)

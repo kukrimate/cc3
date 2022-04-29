@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 #include "cc3.h"
 
 memb_t *make_memb(ty_t *ty, char *name)
