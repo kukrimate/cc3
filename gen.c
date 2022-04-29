@@ -7,7 +7,8 @@ typedef struct case_label case_label_t;
 struct case_label {
     case_label_t *next;
     int label;
-    int val;
+    int begin;
+    int end;
 };
 
 typedef struct jmp_ctx jmp_ctx_t;
@@ -128,7 +129,7 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
                 init->as_expr->as_sym->asm_name);
             break;
         case EXPR_CONST:
-            emit_data(self, "%s %s\n", ty_data_word(ty),
+            emit_data(self, "%s %d\n", ty_data_word(ty),
                 init->as_expr->as_const.value);
             break;
         case EXPR_STR_LIT:
@@ -157,12 +158,13 @@ static int next_label(gen_t *self)
     return self->label_cnt++;
 }
 
-static int next_case_label(gen_t *self, jmp_ctx_t *jmp_ctx, val_t val)
+static int next_case_label(gen_t *self, jmp_ctx_t *jmp_ctx, int begin, int end)
 {
     case_label_t *case_label = calloc(1, sizeof *case_label);
     if (!case_label) abort();
     case_label->label = next_label(self);
-    case_label->val = val;
+    case_label->begin = begin;
+    case_label->end = end;
     *jmp_ctx->case_tail = case_label;
     jmp_ctx->case_tail = &case_label->next;
     return case_label->label;
@@ -393,7 +395,10 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         emit_code(self,
             "mov rcx, rax\n"
             "pop rax\n");
-        switch (expr->ty->kind) {
+        // NOTE: do proper type conversions instead of this hackery
+        // of deciding the width based on the destination type. But for
+        // now this should fix NULL being truncated to 32-bits
+        switch (expr->as_binary.lhs->ty->kind) {
         case TY_CHAR:
         case TY_SCHAR:
         case TY_UCHAR:
@@ -414,6 +419,15 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         case TY_ULLONG:
         case TY_POINTER:
             emit_code(self, "mov qword [rcx], rax\n");
+            break;
+        case TY_STRUCT:
+        case TY_UNION:  // NOTE: Struct and union assignment is a memcpy
+            emit_code(self,
+                "mov rdi, rcx\n"
+                "mov rsi, rax\n"
+                "mov rdx, %d\n"
+                "call memcpy\n",
+                ty_size(expr->ty));
             break;
         default:
             ASSERT_NOT_REACHED();
@@ -593,7 +607,8 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         case STMT_CASE:
             if (!jmp_ctx->case_tail)
                 err("Case only allowed inside switch");
-            emit_target(self, next_case_label(self, jmp_ctx, head->as_case.value));
+            emit_target(self, next_case_label(self, jmp_ctx,
+                head->as_case.begin, head->as_case.end));
             break;
         case STMT_DEFAULT:
             if (!jmp_ctx->case_tail)
@@ -651,10 +666,20 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             // Generate selection ladder
             emit_target(self, ladder_label);
             gen_value(self, jmp_ctx, head->as_switch.cond);
-            for (case_label_t *cur = cases; cur; cur = cur->next) {
-                emit_code(self, "cmp rax, %d\n", cur->val);
-                emit_jump(self, "je", cur->label);
-            }
+            for (case_label_t *cur = cases; cur; cur = cur->next)
+                if (cur->begin == cur->end) {
+                    // Standard case
+                    emit_code(self, "cmp rax, %d\n", cur->begin);
+                    emit_jump(self, "je", cur->label);
+                } else {
+                    // [GNU] Case range
+                    int label_skip = next_label(self);
+                    emit_code(self, "cmp rax, %d\n", cur->begin);
+                    emit_jump(self, "jl", label_skip);
+                    emit_code(self, "cmp rax, %d\n", cur->end);
+                    emit_jump(self, "jle", cur->label);
+                    emit_target(self, label_skip);
+                }
             if (switch_ctx.default_label != -1)
                 emit_jump(self, "jmp", switch_ctx.default_label);
 

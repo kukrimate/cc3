@@ -535,8 +535,9 @@ struct stmt {
         } as_label, as_goto;
 
         struct {
-            int value;
-        } as_case;
+            int begin;
+            int end;
+        } as_case;      // [GNU]: allow case ranges as well
 
         struct {
             expr_t *cond;

@@ -583,68 +583,38 @@ static ty_t *decode_ts(int ts[static NUM_TS])
         int ts[NUM_TS];
         int kind;
     } maps[] = {
-        // void
-        { { [TS_VOID] = 1 }, TY_VOID },
-
-        // char
-        { { [TS_CHAR] = 1 }, TY_CHAR },
-
-        // signed char
-        { { [TS_SIGNED] = 1, [TS_CHAR] = 1 }, TY_SCHAR },
-
-        // unsigned char
-        { { [TS_UNSIGNED] = 1, [TS_CHAR] = 1 }, TY_UCHAR },
-
-        // short
-        { { [TS_SHORT] = 1 }, TY_SHORT },
-        { { [TS_SIGNED] = 1, [TS_SHORT] = 1 }, TY_SHORT },
-        { { [TS_SHORT] = 1, [TS_INT] = 1 }, TY_SHORT },
-        { { [TS_SIGNED] = 1, [TS_SHORT] = 1, [TS_INT] = 1 }, TY_SHORT },
-
-        // unsigned short
-        { { [TS_UNSIGNED] = 1, [TS_SHORT] = 1 }, TY_USHORT },
-        { { [TS_UNSIGNED] = 1, [TS_SHORT] = 1, [TS_INT] = 1 }, TY_USHORT },
-
-        // int
-        { { [TS_INT] = 1 }, TY_INT },
-        { { [TS_SIGNED] = 1 }, TY_INT },
-        { { [TS_SIGNED] = 1, [TS_INT] = 1 }, TY_INT },
-
-        // unsinged int
-        { { [TS_UNSIGNED] = 1 }, TY_UINT },
-        { { [TS_UNSIGNED] = 1, [TS_INT] = 1 }, TY_UINT },
-
-        // long
-        { { [TS_LONG] = 1 }, TY_LONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 1 }, TY_LONG },
-        { { [TS_LONG] = 1, [TS_INT] = 1 }, TY_LONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 1, [TS_INT] = 1 }, TY_LONG },
-
-        // unsinged long
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 1 }, TY_ULONG },
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 1, [TS_INT] = 1 }, TY_ULONG },
-
-        // long long
-        { { [TS_LONG] = 2 }, TY_LLONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 2 }, TY_LLONG },
-        { { [TS_LONG] = 2, [TS_INT] = 1 }, TY_LLONG },
-        { { [TS_SIGNED] = 1, [TS_LONG] = 2, [TS_INT] = 1 }, TY_LLONG },
-
-        // unsinged long long
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 2 }, TY_ULLONG },
-        { { [TS_UNSIGNED] = 1, [TS_LONG] = 2, [TS_INT] = 1 }, TY_ULLONG },
-
-        // float
-        { { [TS_FLOAT] = 1 }, TY_FLOAT },
-
-        // double
-        { { [TS_DOUBLE] = 1 }, TY_DOUBLE },
-
-        // long double
-        { { [TS_LONG] = 1, [TS_DOUBLE] = 1 }, TY_LDOUBLE },
-
-        // _Bool
-        { { [TS_BOOL] = 1 }, TY_BOOL },
+        //  V  C  S  I  L  F  D  S  U  B  C  I
+        { { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_VOID      },  // void
+        { { 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_CHAR      },  // char
+        { { 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_SCHAR     },  // signed char
+        { { 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_UCHAR     },  // unsigned char
+        { { 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_SHORT     },  // short
+        { { 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_SHORT     },  // signed short
+        { { 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_SHORT     },  // short int
+        { { 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_SHORT     },  // signed short int
+        { { 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_USHORT    },  // unsigned short
+        { { 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_USHORT    },  // unsigned short int
+        { { 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_INT       },  // int
+        { { 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_INT       },  // signed
+        { { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_INT       },  // signed int
+        { { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_UINT      },  // unsigned
+        { { 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_UINT      },  // unsigned int
+        { { 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, }, TY_LONG      },  // long
+        { { 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, }, TY_LONG      },  // signed long
+        { { 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, }, TY_LONG      },  // long int
+        { { 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, }, TY_LONG      },  // signed long int
+        { { 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_LONG      },  // unsigned long
+        { { 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_LONG      },  // unsigned long int
+        { { 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, }, TY_LLONG     },  // long long
+        { { 0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, }, TY_LLONG     },  // signed long long
+        { { 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, }, TY_LLONG     },  // long long int
+        { { 0, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0, 0, }, TY_LLONG     },  // signed long long int
+        { { 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, }, TY_ULLONG    },  // unsigned long long
+        { { 0, 0, 0, 1, 2, 0, 0, 0, 1, 0, 0, 0, }, TY_ULLONG    },  // unsigned long long int
+        { { 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, }, TY_FLOAT     },  // float
+        { { 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, }, TY_DOUBLE    },  // double
+        { { 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, }, TY_LDOUBLE   },  // long double
+        { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, }, TY_BOOL      },  // _Bool
     };
 
     for (int i = 0; i < sizeof maps / sizeof *maps; ++i)
@@ -1111,7 +1081,11 @@ void statement(cc3_t *self, stmt_t ***tail)
             append_stmt(tail, stmt);
         } else if (maybe_want(self, TK_CASE)) {
             stmt_t *stmt = make_stmt(STMT_CASE);
-            stmt->as_case.value = constant_expression(self);
+            stmt->as_case.begin = constant_expression(self);
+            if (maybe_want(self, TK_ELLIPSIS))  // [GNU]: case ranges
+                stmt->as_case.end = constant_expression(self);
+            else
+                stmt->as_case.end = stmt->as_case.begin;
             want(self, TK_COLON);
             append_stmt(tail, stmt);
         } else if (maybe_want(self, TK_DEFAULT)) {
