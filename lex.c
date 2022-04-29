@@ -2,10 +2,10 @@
 
 #include "cc3.h"
 
-void lex_init(lexer_t *self, FILE *fp)
+void lex_init(lexer_t *self, int in_fd)
 {
     // Setup input buffer
-    self->fp = fp;
+    self->in_fd = in_fd;
     self->cur = self->buf;
     self->end = self->buf;
 
@@ -40,7 +40,7 @@ static int lex_peek(lexer_t *self, int i)
         *self->cur++ = *tmp++;
 
     // Fill buffer with characters
-    self->end = self->cur + fread(self->cur, 1, LEX_BUF_SZ / 2, self->fp);
+    self->end = self->cur + read(self->in_fd, self->cur, LEX_BUF_SZ / 2);
 
     // Return character if we read enough
     if (self->cur + i < self->end)

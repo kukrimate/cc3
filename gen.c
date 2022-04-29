@@ -115,11 +115,16 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
         break;
 
     case TY_ARRAY:
-        assert(init->kind == INIT_LIST);
-        init = init->as_list;
-        for (int i = 0; i < ty->array.cnt; ++i) {
-            gen_static_initializer(self, ty->array.elem_ty, init);
-            init = init->next;
+        if (init->kind == INIT_EXPR) {                  // String literal
+            char *data = init->as_expr->as_str_lit.data;
+            for (int i = 0; i < ty->array.cnt; ++i)
+                emit_data(self, "db %02Xh\n", data[i]);
+        } else {                                        // Initializer list
+            init = init->as_list;
+            for (int i = 0; i < ty->array.cnt; ++i) {
+                gen_static_initializer(self, ty->array.elem_ty, init);
+                init = init->next;
+            }
         }
         break;
 
@@ -618,12 +623,18 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
             offset + ty->as_aggregate.members->offset, init);
         break;
     case TY_ARRAY:
-        assert(init->kind == INIT_LIST);
-        init = init->as_list;
-        for (int i = 0; i < ty->array.cnt; ++i) {
-            gen_initializer(self, jmp_ctx, ty->array.elem_ty, offset, init);
-            init = init->next;
-            offset += ty_size(ty->array.elem_ty);
+        if (init->kind == INIT_EXPR) {                  // String literal
+            char *data = init->as_expr->as_str_lit.data;
+            for (int i = 0; i < ty->array.cnt; ++i, ++offset)
+                emit_code(self, "mov byte [rbp - %d], %02Xh\n",
+                    self->offset - offset, data[i]);
+        } else {                                        // Initializer list
+            init = init->as_list;
+            for (int i = 0; i < ty->array.cnt; ++i) {
+                gen_initializer(self, jmp_ctx, ty->array.elem_ty, offset, init);
+                init = init->next;
+                offset += ty_size(ty->array.elem_ty);
+            }
         }
         break;
     default:

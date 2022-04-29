@@ -23,4 +23,8 @@ int main(void)
     struct foo s = { 5, 6 };
     printf("s.a = %d\n", s.a);
     printf("s.b = %d\n", s.b);
+
+    char foobar[] = "foobar";
+    static char foobar2[] = "foobar";
+    printf("%s %s\n", foobar, foobar2);
 }

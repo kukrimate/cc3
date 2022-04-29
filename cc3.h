@@ -5,11 +5,13 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /** Enforce unreachability **/
@@ -28,7 +30,7 @@ __attribute__((noreturn)) void err(const char *fmt, ...);
 #ifdef NDEBUG
 #define debugln(fmt, ...)
 #else
-#define debugln(fmt, ...) println(fmt, __VA_ARGS__)
+#define debugln(fmt, ...) println(fmt __VA_OPT__(,) __VA_ARGS__)
 #endif
 
 /** Resizable string abstraction **/
@@ -175,7 +177,7 @@ typedef struct lexer lexer_t;
 
 struct lexer {
     // Input file
-    FILE *fp;
+    int in_fd;
 
     // Input buffer (not really a FIFO, it's just cheaper to shift
     //               the few remaining chars up after a lookahead)
@@ -192,7 +194,7 @@ struct lexer {
     tk_t *tk;
 };
 
-void lex_init(lexer_t *self, FILE *fp);
+void lex_init(lexer_t *self, int in_fd);
 void lex_free(lexer_t *self);
 tk_t *lex_tok(lexer_t *self, int i);
 void lex_adv(lexer_t *self);

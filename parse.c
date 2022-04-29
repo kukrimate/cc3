@@ -633,8 +633,8 @@ static ty_t *decode_ts(int ts[static NUM_TS])
         { { 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, }, TY_LONG      },  // signed long
         { { 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, }, TY_LONG      },  // long int
         { { 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, }, TY_LONG      },  // signed long int
-        { { 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_LONG      },  // unsigned long
-        { { 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_LONG      },  // unsigned long int
+        { { 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_ULONG     },  // unsigned long
+        { { 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_ULONG     },  // unsigned long int
         { { 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, }, TY_LLONG     },  // long long
         { { 0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, }, TY_LLONG     },  // signed long long
         { { 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, }, TY_LLONG     },  // long long int
@@ -648,7 +648,7 @@ static ty_t *decode_ts(int ts[static NUM_TS])
     };
 
     for (int i = 0; i < sizeof maps / sizeof *maps; ++i)
-        if (memcmp(ts, maps[i].ts, sizeof maps[i].ts) == 0)
+        if (!memcmp(ts, maps[i].ts, sizeof maps[i].ts))
             return make_ty(maps[i].kind);
 
     err("Provided type specifiers do not name a valid type");
