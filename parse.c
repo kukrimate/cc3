@@ -60,6 +60,7 @@ static expr_t *expression(cc3_t *self);
 static int constant_expression(cc3_t *self);
 
 static stmt_t *read_block(cc3_t *self);
+static ty_t *type_name(cc3_t *self);
 
 expr_t *primary_expression(cc3_t *self)
 {
@@ -68,6 +69,32 @@ expr_t *primary_expression(cc3_t *self)
 
     switch (tk->type) {
     case TK_IDENTIFIER:
+        if (!strcmp(tk_str(tk), "__builtin_va_start")) {
+            want(self, TK_LPAREN);
+            expr = make_unary(EXPR_VA_START, assignment_expression(self));
+            want(self, TK_COMMA);
+            // Per C standard we take the last non-variadic parameter as an
+            // argument, however we already know which one it is, so we can
+            // just discard it.
+            assignment_expression(self);
+            want(self, TK_RPAREN);
+            break;
+        }
+        if (!strcmp(tk_str(tk), "__builtin_va_end")) {
+            want(self, TK_LPAREN);
+            expr = make_unary(EXPR_VA_END, assignment_expression(self));
+            want(self, TK_RPAREN);
+            break;
+        }
+        if (!strcmp(tk_str(tk), "__builtin_va_arg")) {
+            want(self, TK_LPAREN);
+            expr = make_unary(EXPR_VA_ARG, assignment_expression(self));
+            want(self, TK_COMMA);
+            expr->ty = type_name(self);
+            want(self, TK_RPAREN);
+            break;
+        }
+
         expr = make_sym(&self->sema, tk_str(tk));
         break;
     case TK_CONSTANT:
@@ -87,7 +114,9 @@ expr_t *primary_expression(cc3_t *self)
         }
     case TK_LPAREN:
         if (maybe_want(self, TK_LCURLY)) {  // [GNU]: statement expressions
+            sema_enter(&self->sema);
             stmt_t *body = read_block(self);
+            sema_exit(&self->sema);
             want(self, TK_RPAREN);
             expr = make_stmt_expr(body);
         } else {
@@ -154,7 +183,6 @@ expr_t *postfix_expression(cc3_t *self)
 }
 
 static bool is_declaration_specifier(cc3_t *self, tk_t *tk);
-static ty_t *type_name(cc3_t *self);
 
 expr_t *unary_expression(cc3_t *self)
 {
@@ -903,7 +931,7 @@ static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
                     case TY_VOID:
                         err("Parameter type cannot be void");
                     case TY_ARRAY:
-                        ty->kind = TY_POINTER;
+                        ty = make_pointer(ty->array.elem_ty);
                         break;
                     case TY_FUNCTION:
                         ty = make_pointer(ty);
@@ -1282,6 +1310,11 @@ void parse(cc3_t *self)
                 // entering the context of a new function
                 self->sema.func_name = sym->name;
                 self->sema.offset = 0;
+
+                // NOTE: if we are dealing with a varargs function, we *must*
+                // leave 48 bytes as a register save area
+                if (ty->function.var)
+                    self->sema.offset = 48;
 
                 // Now we can allocate space in the stack frame for the
                 // parameters of the current function

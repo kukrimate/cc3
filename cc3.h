@@ -422,6 +422,11 @@ enum {
     EXPR_SEQ,   // Comma operator
 
     EXPR_STMT,  // [GNU] Statement expression
+
+    // Varargs built-ins, these cannot just be built-in decls :/
+    EXPR_VA_START,
+    EXPR_VA_END,
+    EXPR_VA_ARG,
 };
 
 typedef struct expr expr_t;
@@ -572,10 +577,17 @@ stmt_t *make_stmt(int kind);
 typedef struct gen gen_t;
 
 struct gen {
+    /** Function state **/
+
     // Size of the current frame
     int offset;
+    // Initial gp_offset
+    int gp_offset;
     // State of the current function
     int label_cnt;
+
+    /** Global state **/
+
     // Number of string literals
     int str_lit_cnt;
     // Output code and data

@@ -264,9 +264,28 @@ void sema_init(sema_t *self)
 
     self->block_static_cnt = 0;
 
-    // FIXME: declare the real type of this
+    // Declare va_list type, this is defined by the SysV AMD64 ABI
+
+    // typedef struct {
+    //     unsigned int gp_offset;
+    //     unsigned int fp_offset;
+    //     void *overflow_arg_area;
+    //     void *reg_save_area;
+    // } va_list[1];
+
+    ty_t *va_list_struct = make_ty(TY_STRUCT);
+    memb_t *memb, **tail = &memb;
+    *tail = make_memb(make_ty(TY_UINT), "gp_offset");
+    tail = &(*tail)->next;
+    *tail = make_memb(make_ty(TY_UINT), "fp_offset");
+    tail = &(*tail)->next;
+    *tail = make_memb(make_pointer(make_ty(TY_VOID)), "overflow_arg_area");
+    tail = &(*tail)->next;
+    *tail = make_memb(make_pointer(make_ty(TY_VOID)), "reg_save_area");
+    define_struct(va_list_struct, memb);
+
     sema_declare(self, TK_TYPEDEF,
-        make_pointer(make_ty(TY_VOID)),
+        make_array(va_list_struct, 1),
         strdup("__builtin_va_list"));
 }
 
@@ -644,6 +663,15 @@ expr_t *make_unary(int kind, expr_t *arg)
     {
         expr_t *expr = make_expr(kind);
         expr->ty = make_ty(TY_INT);
+        expr->as_unary.arg = arg;
+        return expr;
+    }
+    case EXPR_VA_START:
+    case EXPR_VA_END:
+    case EXPR_VA_ARG:
+    {
+        expr_t *expr = make_expr(kind);
+        expr->ty = make_ty(TY_VOID);
         expr->as_unary.arg = arg;
         return expr;
     }

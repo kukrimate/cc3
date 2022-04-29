@@ -50,7 +50,7 @@ static int emit_str_lit(gen_t *self, const char *s)
     int idx = self->str_lit_cnt++;
 
     // Emit name
-    string_printf(&self->lits, "str$%d db ", idx);
+    string_printf(&self->lits, "$str$%d db ", idx);
     // Emit chars
     while (*s)
         string_printf(&self->lits, "%02Xh, ", *s++);
@@ -125,7 +125,7 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
         assert(init->kind == INIT_EXPR);
         switch (init->as_expr->kind) {
         case EXPR_SYM:
-            emit_data(self, "%s %s\n", ty_data_word(ty),
+            emit_data(self, "%s $%s\n", ty_data_word(ty),
                 init->as_expr->as_sym->asm_name);
             break;
         case EXPR_CONST:
@@ -133,7 +133,7 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
                 init->as_expr->as_const.value);
             break;
         case EXPR_STR_LIT:
-            emit_data(self, "%s str$%d\n", ty_data_word(ty),
+            emit_data(self, "%s $str$%d\n", ty_data_word(ty),
                 emit_str_lit(self, init->as_expr->as_str_lit.data));
             break;
         default:
@@ -146,10 +146,10 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
 void gen_static(gen_t *self, sym_t *sym, init_t *init)
 {
     emit_data(self,
-        "%s:\n"
-        "align %d\n",
-        sym->asm_name,
-        ty_align(sym->ty));
+        "align %d\n"
+        "%s:\n",
+        ty_align(sym->ty),
+        sym->asm_name);
     gen_static_initializer(self, sym->ty, init);
 }
 
@@ -188,31 +188,43 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head);
 void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 {
     switch (expr->kind) {
-        case EXPR_SYM:
-            {
-                sym_t *sym = expr->as_sym;
+    case EXPR_SYM:
+        {
+            sym_t *sym = expr->as_sym;
 
-                if (sym->kind == SYM_LOCAL)
-                    emit_code(self, "lea rax, [rbp - %d]\n",
-                                self->offset - sym->offset);
-                else
-                    emit_code(self, "mov rax, %s\n", sym->asm_name);
-            }
-            break;
-        case EXPR_STR_LIT:
-            emit_code(self, "mov rax, str$%d\n",
-                        emit_str_lit(self, expr->as_str_lit.data));
-            break;
-        case EXPR_MEMB:
-            gen_addr(self, jmp_ctx, expr->as_memb.aggr);
-            if (expr->as_memb.offset)
-                emit_code(self, "add rax, %d\n", expr->as_memb.offset);
-            break;
-        case EXPR_DREF:
-            gen_value(self, jmp_ctx, expr->as_unary.arg);
-            break;
-        default:
-            err("Expected lvalue expression");
+            if (sym->kind == SYM_LOCAL)
+                emit_code(self, "lea rax, [rbp - %d]\n",
+                            self->offset - sym->offset);
+            else
+                emit_code(self, "mov rax, $%s\n", sym->asm_name);
+        }
+        break;
+    case EXPR_STR_LIT:
+        emit_code(self, "mov rax, $str$%d\n",
+                    emit_str_lit(self, expr->as_str_lit.data));
+        break;
+    case EXPR_MEMB:
+        gen_addr(self, jmp_ctx, expr->as_memb.aggr);
+        if (expr->as_memb.offset)
+            emit_code(self, "add rax, %d\n", expr->as_memb.offset);
+        break;
+    case EXPR_DREF:
+        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        break;
+    case EXPR_VA_ARG:
+        // First we need the address of our va_list
+        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        // FIXME: this only works with arguments passed in registers
+        // We need to calculate the sum of gp_offset, reg_save_area
+        // Then finally skip over the register we've consumed
+        emit_code(self,
+            "mov rcx, rax\n"
+            "mov eax, dword [rcx]\n"
+            "add rax, qword [rcx + 16]\n"
+            "add dword [rcx], 8\n");
+        break;
+    default:
+        err("Expected lvalue expression");
     }
 }
 
@@ -241,6 +253,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     case EXPR_STR_LIT:
     case EXPR_MEMB:
     case EXPR_DREF:
+    case EXPR_VA_ARG:
         // Generate lvalue address
         gen_addr(self, jmp_ctx, expr);
 
@@ -457,6 +470,27 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
     case EXPR_STMT:
         gen_stmts(self, jmp_ctx, expr->as_stmt);
+        break;
+
+    case EXPR_VA_START:
+        // Get the address of the va_list
+        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        // Write gp_offset and fp_offset
+        emit_code(self,
+            "mov dword [rax], %d\n"
+            "mov dword [rax + 4], 0\n",
+            self->gp_offset);
+        // Fill the pointers
+        emit_code(self,
+            "lea rcx, [rbp + 16]\n"
+            "mov qword [rax + 8], rcx\n");  // overflow_arg_area
+        emit_code(self,
+            "lea rcx, [rbp - %d]\n"
+            "mov qword [rax + 16], rcx\n",
+            self->offset);                  // reg_save_area
+        break;
+
+    case EXPR_VA_END:   // No-op on AMD64
         break;
 
     default:
@@ -788,7 +822,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         }
 }
 
-static void gen_param_spill(gen_t *self, sym_t *sym, int i)
+static void gen_param_spill(gen_t *self, ty_t *ty, int offset, int i)
 {
     assert(i < 6);
 
@@ -797,27 +831,27 @@ static void gen_param_spill(gen_t *self, sym_t *sym, int i)
     static const char *dw[] = { "edi", "esi", "edx", "ecx", "r8d", "r9d" };
     static const char *qw[] = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" };
 
-    switch (sym->ty->kind) {
+    switch (ty->kind) {
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
     case TY_BOOL:
-        emit_code(self, "mov byte [rbp - %d], %s\n", self->offset - sym->offset, byte[i]);
+        emit_code(self, "mov byte [rbp - %d], %s\n", self->offset - offset, byte[i]);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "mov word [rbp - %d], %s\n", self->offset - sym->offset, word[i]);
+        emit_code(self, "mov word [rbp - %d], %s\n", self->offset - offset, word[i]);
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - sym->offset, dw[i]);
+        emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - offset, dw[i]);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "mov qword [rbp - %d], %s\n", self->offset - sym->offset, qw[i]);
+        emit_code(self, "mov qword [rbp - %d], %s\n", self->offset - offset, qw[i]);
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -828,21 +862,30 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
 {
     // Generate entry sequence
     emit_code(self,
-        "%s:\n"
+        "$%s:\n"
         "push rbp\n"
         "mov rbp, rsp\n"
         "sub rsp, %d\n",
         sym->asm_name,
         self->offset = align(offset, 16));
 
-    // Setup function specific values
-    self->label_cnt = 0;
+    // Generate varargs register save prologue
+    // NOTE: this ignores FPU registers for now
+    if (sym->ty->function.var)
+        for (int i = 0, offset = 0; i < 6; ++i, offset += 8)
+            gen_param_spill(self, make_ty(TY_LONG), offset, i);
 
     // Generate parameter spill code
     param_t *param = sym->ty->function.params;
     int param_i = 0;
     for (; param; param = param->next)
-        gen_param_spill(self, param->sym, param_i++);
+        gen_param_spill(self, param->sym->ty, param->sym->offset, param_i++);
+
+    // Starting gp_offset is after the last named parameter
+    self->gp_offset = param_i * 8;
+
+    // Setup function specific values
+    self->label_cnt = 0;
 
     // Generate body
     jmp_ctx_t func_ctx = { next_label(self), -1, -1, NULL, -1 };
