@@ -2,39 +2,79 @@
 
 #include "cc3.h"
 
-/** Interface to the lexer **/
+/** Initialization **/
 
-static inline tk_t *peek(cc3_t *self, int i)
+void cc3_init(cc3_t *self, int in_fd)
 {
-    return lex_tok(&self->lexer, i);
+    lex_init(&self->lexer, in_fd);
+    self->tk_pos = 0;
+    self->tk_cnt = 0;
+    for (int i = 0; i < LOOKAHEAD_CNT; ++i) {
+        string_init(&self->tk_buf[i].spelling);
+        string_init(&self->tk_buf[i].str);
+    }
+    sema_init(&self->sema);
+    gen_init(&self->gen);
 }
 
-static inline void adv(cc3_t *self)
+void cc3_free(cc3_t *self)
 {
-    lex_adv(&self->lexer);
+    lex_free(&self->lexer);
+    for (int i = 0; i < LOOKAHEAD_CNT; ++i) {
+        string_free(&self->tk_buf[i].spelling);
+        string_init(&self->tk_buf[i].str);
+    }
+    sema_free(&self->sema);
+    gen_free(&self->gen);
+}
+
+/** Interface to the lexer **/
+
+static tk_t *peek(cc3_t *self, int i)
+{
+    // Make sure lookahead doesn't go too far
+    assert(i < LOOKAHEAD_CNT);
+
+    // Add tokens until we have enough
+    while (self->tk_cnt <= i)
+        lex_next(&self->lexer,
+            self->tk_buf + (self->tk_pos + self->tk_cnt++) % LOOKAHEAD_CNT);
+
+    // Return pointer to i-th token
+    return self->tk_buf + (self->tk_pos + i) % LOOKAHEAD_CNT;
+}
+
+static void adv(cc3_t *self)
+{
+    // Make sure the buffer is not empty
+    assert(self->tk_cnt > 0);
+
+    // Skip over the front token
+    self->tk_pos = (self->tk_pos + 1) % LOOKAHEAD_CNT;
+    --self->tk_cnt;
 }
 
 static inline tk_t *next(cc3_t *self)
 {
-    tk_t *tk = lex_tok(&self->lexer, 0);
-    lex_adv(&self->lexer);
+    tk_t *tk = peek(self, 0);
+    adv(self);
     return tk;
 }
 
 static inline tk_t *want(cc3_t *self, int want_type)
 {
-    tk_t *tk = lex_tok(&self->lexer, 0);
+    tk_t *tk = peek(self, 0);
     if (tk->type != want_type)
         err("Unexpected token %t", tk);
-    lex_adv(&self->lexer);
+    adv(self);
     return tk;
 }
 
 static inline tk_t *maybe_want(cc3_t *self, int want_type)
 {
-    tk_t *tk = lex_tok(&self->lexer, 0);
+    tk_t *tk = peek(self, 0);
     if (tk->type == want_type) {
-        lex_adv(&self->lexer);
+        adv(self);
         return tk;
     }
     return NULL;
@@ -1286,7 +1326,7 @@ static stmt_t *read_block(cc3_t *self)
     return head;
 }
 
-void parse(cc3_t *self)
+void cc3_parse(cc3_t *self)
 {
     int sc;
     ty_t *base_ty;

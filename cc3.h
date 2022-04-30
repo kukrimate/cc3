@@ -171,7 +171,6 @@ static inline const char *tk_str(tk_t *tk)
 /** Lexer **/
 
 #define LEX_BUF_SZ 8192
-#define LEX_TK_CNT 2
 
 typedef struct lexer lexer_t;
 
@@ -185,19 +184,12 @@ struct lexer {
 
     // Current position in the input
     size_t line, col;
-
-    // Token buffer (FIFO)
-    tk_t tk_buf[LEX_TK_CNT];
-    int tk_pos, tk_cnt;
-
-    // Current token
-    tk_t *tk;
 };
 
 void lex_init(lexer_t *self, int in_fd);
 void lex_free(lexer_t *self);
-tk_t *lex_tok(lexer_t *self, int i);
-void lex_adv(lexer_t *self);
+int lex_next(lexer_t *self, tk_t *tk);
+
 
 /** Types **/
 
@@ -605,16 +597,29 @@ void gen_free(gen_t *self);
 void gen_static(gen_t *self, sym_t *sym, init_t *init);
 void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body);
 
-/** Parser **/
+/** Compiler context **/
+
+#define LOOKAHEAD_CNT 2
 
 typedef struct cc3 cc3_t;
 
 struct cc3 {
+    // Lexical analyzer
     lexer_t lexer;
+
+    // Token buffer (FIFO)
+    tk_t tk_buf[LOOKAHEAD_CNT];
+    int tk_pos, tk_cnt;
+
+    // Semantic analyzer
     sema_t sema;
+    // Code generator
     gen_t gen;
 };
 
-void parse(cc3_t *self);
+void cc3_init(cc3_t *self, int in_fd);
+void cc3_free(cc3_t *self);
+
+void cc3_parse(cc3_t *self);
 
 #endif

@@ -4,30 +4,20 @@
 
 void lex_init(lexer_t *self, int in_fd)
 {
-    // Setup input buffer
     self->in_fd = in_fd;
+
     self->cur = self->buf;
     self->end = self->buf;
 
-    // Setup token buffer
-    self->tk_pos = 0;
-    self->tk_cnt = 0;
-
-    for (int i = 0; i < LEX_TK_CNT; ++i) {
-        string_init(&self->tk_buf[i].spelling);
-        string_init(&self->tk_buf[i].str);
-    }
+    self->line = 1;
+    self->col = 1;
 }
 
 void lex_free(lexer_t *self)
 {
-    for (int i = 0; i < LEX_TK_CNT; ++i) {
-        string_free(&self->tk_buf[i].spelling);
-        string_init(&self->tk_buf[i].str);
-    }
 }
 
-static int lex_peek(lexer_t *self, int i)
+static int peek(lexer_t *self, int i)
 {
     // Return character if in bounds
     if (self->cur + i < self->end)
@@ -50,7 +40,7 @@ static int lex_peek(lexer_t *self, int i)
     return EOF;
 }
 
-static int lex_eat(lexer_t *self)
+static int eat(lexer_t *self, tk_t *tk)
 {
     int ch = *self->cur++;
 
@@ -63,36 +53,34 @@ static int lex_eat(lexer_t *self)
     }
 
     // Add character to spelling
-    string_push(&self->tk->spelling, ch);
+    string_push(&tk->spelling, ch);
 
     return ch;
 }
 
-static int lex_input(lexer_t *self)
+static int input(lexer_t *self, tk_t *tk)
 {
-    int ch = lex_peek(self, 0);
+    int ch = peek(self, 0);
     // Increment current position if not at EOF
     if (ch != EOF)
-        lex_eat(self);
+        eat(self, tk);
     // Return char we've just read
     return ch;
 }
 
-static bool lex_match(lexer_t *self, int want)
+static bool match(lexer_t *self, tk_t *tk, int want)
 {
-    int ch = lex_peek(self, 0);
+    int ch = peek(self, 0);
     // Increment position if it's a match
     if (ch == want) {
-        lex_eat(self);
+        eat(self, tk);
         return true;
     }
     return false;
 }
 
-static int lex_check_keyword(lexer_t *self)
+static int check_keyword(const char *spelling)
 {
-    const char *spelling = self->tk->spelling.data;
-
     if (!strcmp(spelling, "auto"))          return TK_AUTO;
     if (!strcmp(spelling, "break"))         return TK_BREAK;
     if (!strcmp(spelling, "case"))          return TK_CASE;
@@ -131,13 +119,12 @@ static int lex_check_keyword(lexer_t *self)
     if (!strcmp(spelling, "_Bool"))         return TK_BOOL;
     if (!strcmp(spelling, "_Complex"))      return TK_COMPLEX;
     if (!strcmp(spelling, "_Imaginary"))    return TK_IMAGINARY;
-
     return TK_IDENTIFIER;
 }
 
-static int lex_unescape(lexer_t *self)
+static int unescape(lexer_t *self, tk_t *tk)
 {
-    int val = lex_input(self);
+    int val = input(self, tk);
 
     switch (val) {
     // Single char
@@ -155,8 +142,8 @@ static int lex_unescape(lexer_t *self)
     // Octal
     case '0' ... '7':
         val -= '0';
-        for (int ch;; lex_adv(self))
-            switch ((ch = lex_peek(self, 0))) {
+        for (int ch;; eat(self, tk))
+            switch ((ch = peek(self, 0))) {
             case '0' ... '7':
                 val = val << 3 | (ch - '0');
                 break;
@@ -165,8 +152,8 @@ static int lex_unescape(lexer_t *self)
             }
     // Hex
     case 'x':
-        for (int ch;; lex_adv(self))
-            switch ((ch = lex_peek(self, 0))) {
+        for (int ch;; eat(self, tk))
+            switch ((ch = peek(self, 0))) {
             case '0' ... '9':
                 val = val << 4 | (ch - '0');
                 break;
@@ -184,30 +171,30 @@ static int lex_unescape(lexer_t *self)
     }
 }
 
-static void lex_int_suffix(lexer_t *self)
+static void int_suffix(lexer_t *self, tk_t *tk)
 {
     // FIXME: this is not really correct
-    while (lex_match(self, 'u') || lex_match(self, 'U')
-            || lex_match(self, 'l') || lex_match(self, 'L'))
+    while (match(self, tk, 'u') || match(self, tk, 'U')
+            || match(self, tk, 'l') || match(self, tk, 'L'))
         ;
 }
 
-static int lex_next(lexer_t *self)
+int lex_next(lexer_t *self, tk_t *tk)
 {
     int ch;
 
 retry:
     // Clear token spelling
-    string_clear(&self->tk->spelling);
+    string_clear(&tk->spelling);
 
     // Save token starting position
-    self->tk->line = self->line;
-    self->tk->col = self->col;
+    tk->line = self->line;
+    tk->col = self->col;
 
-    switch ((ch = lex_input(self))) {
+    switch ((ch = input(self, tk))) {
     // End of file
     case EOF:
-        return TK_EOF;
+        return (tk->type = TK_EOF);
     // Whitespace
     case ' ':
     case '\f':
@@ -220,235 +207,207 @@ retry:
     case '_':
     case 'a' ... 'z':
     case 'A' ... 'Z':
-        string_clear(&self->tk->str);
-        string_push(&self->tk->str, ch);
-        for (;; lex_eat(self))
-            switch ((ch = lex_peek(self, 0))) {
+        for (;; eat(self, tk))
+            switch (peek(self, 0)) {
             case '_':
             case 'a' ... 'z':
             case 'A' ... 'Z':
             case '0' ... '9':
-                string_push(&self->tk->str, ch);
                 break;
             default:
-                return lex_check_keyword(self);
+                return (tk->type = check_keyword(tk->spelling.data));
             }
     // Constant
     case '0':
         // Hex
-        if (lex_match(self, 'x') || lex_match(self, 'X')) {
-            self->tk->val = 0;
-            for (;; lex_eat(self))
-                switch ((ch = lex_peek(self, 0))) {
+        if (match(self, tk, 'x') || match(self, tk, 'X')) {
+            tk->val = 0;
+            for (;; eat(self, tk))
+                switch ((ch = peek(self, 0))) {
                 case '0' ... '9':
-                    self->tk->val = (self->tk->val << 4) | (ch - '0');
+                    tk->val = (tk->val << 4) | (ch - '0');
                     break;
                 case 'a' ... 'f':
-                    self->tk->val = (self->tk->val << 4) | (ch - 'a' + 0xa);
+                    tk->val = (tk->val << 4) | (ch - 'a' + 0xa);
                     break;
                 case 'A' ... 'F':
-                    self->tk->val = (self->tk->val << 4) | (ch - 'A' + 0xa);
+                    tk->val = (tk->val << 4) | (ch - 'A' + 0xa);
                     break;
                 default:
-                    lex_int_suffix(self);
-                    return TK_CONSTANT;
+                    int_suffix(self, tk);
+                    return (tk->type = TK_CONSTANT);
                 }
         }
         // Octal
-        self->tk->val = 0;
-        for (;; lex_eat(self))
-            switch ((ch = lex_peek(self, 0))) {
+        tk->val = 0;
+        for (;; eat(self, tk))
+            switch ((ch = peek(self, 0))) {
             case '0' ... '7':
-                self->tk->val = (self->tk->val << 3) | (ch - '0');
+                tk->val = (tk->val << 3) | (ch - '0');
                 break;
             default:
-                lex_int_suffix(self);
-                return TK_CONSTANT;
+                int_suffix(self, tk);
+                return (tk->type = TK_CONSTANT);
             }
     case '1' ... '9':
         // Decimal
-        self->tk->val = ch - '0';
-        for (;; lex_eat(self))
-            switch ((ch = lex_peek(self, 0))) {
+        tk->val = ch - '0';
+        for (;; eat(self, tk))
+            switch ((ch = peek(self, 0))) {
             case '0' ... '9':
-                self->tk->val = self->tk->val * 10 + ch - '0';
+                tk->val = tk->val * 10 + ch - '0';
                 break;
             default:
-                lex_int_suffix(self);
-                return TK_CONSTANT;
+                int_suffix(self, tk);
+                return (tk->type = TK_CONSTANT);
             }
     // Character constant
     case '\'':
-        self->tk->val = 0;
+        tk->val = 0;
         for (;;)
-            switch ((ch = lex_input(self))) {
+            switch ((ch = input(self, tk))) {
             case EOF:
             case '\n':
-                return TK_ERROR;
+                return (tk->type = TK_ERROR);
             case '\'':
-                return TK_CONSTANT;
+                return (tk->type = TK_CONSTANT);
             case '\\':
-                ch = lex_unescape(self);
+                ch = unescape(self, tk);
                 // FALLTHROUGH
             default:
-                self->tk->val = (self->tk->val << 8) | ch;
+                tk->val = (tk->val << 8) | ch;
             }
     // String literal
     case '\"':
-        string_clear(&self->tk->str);
+        string_clear(&tk->str);
         for (;;)
-            switch ((ch = lex_input(self))) {
+            switch ((ch = input(self, tk))) {
             case EOF:
             case '\n':
-                return TK_ERROR;
+                return (tk->type = TK_ERROR);
             case '\"':
-                return TK_STR_LIT;
+                return (tk->type = TK_STR_LIT);
             case '\\':
-                ch = lex_unescape(self);
+                ch = unescape(self, tk);
                 // FALLTHROUGH
             default:
-                string_push(&self->tk->str, ch);
+                string_push(&tk->str, ch);
             }
     case '[':
-        return TK_LSQ;
+        return (tk->type = TK_LSQ);
     case ']':
-        return TK_RSQ;
+        return (tk->type = TK_RSQ);
     case '(':
-        return TK_LPAREN;
+        return (tk->type = TK_LPAREN);
     case ')':
-        return TK_RPAREN;
+        return (tk->type = TK_RPAREN);
     case '{':
-        return TK_LCURLY;
+        return (tk->type = TK_LCURLY);
     case '}':
-        return TK_RCURLY;
+        return (tk->type = TK_RCURLY);
     case '~':
-        return TK_NOT;
+        return (tk->type = TK_NOT);
     case '?':
-        return TK_COND;
+        return (tk->type = TK_COND);
     case ':':
-        return TK_COLON;
+        return (tk->type = TK_COLON);
     case ';':
-        return TK_SEMICOLON;
+        return (tk->type = TK_SEMICOLON);
     case ',':
-        return TK_COMMA;
+        return (tk->type = TK_COMMA);
     case '.':
-        if (lex_peek(self, 0) == '.' && lex_peek(self, 1) == '.') {
-            lex_eat(self);
-            lex_eat(self);
-            return TK_ELLIPSIS;
+        if (peek(self, 0) == '.' && peek(self, 1) == '.') {
+            eat(self, tk);
+            eat(self, tk);
+            return (tk->type = TK_ELLIPSIS);
         }
-        return TK_DOT;
+        return (tk->type = TK_DOT);
     case '!':
-        if (lex_match(self, '='))
-            return TK_NE;
-        return TK_LNOT;
+        if (match(self, tk, '='))
+            return (tk->type = TK_NE);
+        return (tk->type = TK_LNOT);
     case '*':
-        if (lex_match(self, '='))
-            return TK_MUL_AS;
-        return TK_MUL;
+        if (match(self, tk, '='))
+            return (tk->type = TK_MUL_AS);
+        return (tk->type = TK_MUL);
     case '/':
         // ANSI C comment
-        if (lex_match(self, '*')) {
+        if (match(self, tk, '*')) {
             do
-                while ((ch = lex_input(self)) != '*' && ch != EOF);
-            while ((ch = lex_input(self)) != '/' && ch != EOF);
+                while ((ch = input(self, tk)) != '*' && ch != EOF);
+            while (ch != EOF && !match(self, tk, '/'));
             goto retry;
         }
         // C++ comment
-        if (lex_match(self, '/')) {
-            while ((ch = lex_input(self)) != '\n' && ch != EOF);
+        if (match(self, tk, '/')) {
+            while ((ch = input(self, tk)) != '\n' && ch != EOF);
             goto retry;
         }
-        if (lex_match(self, '='))
-            return TK_DIV_AS;
-        return TK_DIV;
+        if (match(self, tk, '='))
+            return (tk->type = TK_DIV_AS);
+        return (tk->type = TK_DIV);
     case '%':
-        if (lex_match(self, '='))
-            return TK_MOD_AS;
-        return TK_MOD;
+        if (match(self, tk, '='))
+            return (tk->type = TK_MOD_AS);
+        return (tk->type = TK_MOD);
     case '+':
-        if (lex_match(self, '+'))
-            return TK_INCR;
-        if (lex_match(self, '='))
-            return TK_ADD_AS;
-        return TK_ADD;
+        if (match(self, tk, '+'))
+            return (tk->type = TK_INCR);
+        if (match(self, tk, '='))
+            return (tk->type = TK_ADD_AS);
+        return (tk->type = TK_ADD);
     case '-':
-        if (lex_match(self, '>'))
-            return TK_ARROW;
-        if (lex_match(self, '-'))
-            return TK_DECR;
-        if (lex_match(self, '='))
-            return TK_SUB_AS;
-        return TK_SUB;
+        if (match(self, tk, '>'))
+            return (tk->type = TK_ARROW);
+        if (match(self, tk, '-'))
+            return (tk->type = TK_DECR);
+        if (match(self, tk, '='))
+            return (tk->type = TK_SUB_AS);
+        return (tk->type = TK_SUB);
     case '<':
-        if (lex_match(self, '<')) {
-            if (lex_match(self, '='))
-                return TK_LSH_AS;
-            return TK_LSH;
+        if (match(self, tk, '<')) {
+            if (match(self, tk, '='))
+                return (tk->type = TK_LSH_AS);
+            return (tk->type = TK_LSH);
         }
-        if (lex_match(self, '='))
-            return TK_LE;
-        return TK_LT;
+        if (match(self, tk, '='))
+            return (tk->type = TK_LE);
+        return (tk->type = TK_LT);
     case '>':
-        if (lex_match(self, '>')) {
-            if (lex_match(self, '='))
-                return TK_RSH_AS;
-            return TK_RSH;
+        if (match(self, tk, '>')) {
+            if (match(self, tk, '='))
+                return (tk->type = TK_RSH_AS);
+            return (tk->type = TK_RSH);
         }
-        if (lex_match(self, '='))
-            return TK_GE;
-        return TK_GT;
+        if (match(self, tk, '='))
+            return (tk->type = TK_GE);
+        return (tk->type = TK_GT);
     case '=':
-        if (lex_match(self, '='))
-            return TK_EQ;
-        return TK_AS;
+        if (match(self, tk, '='))
+            return (tk->type = TK_EQ);
+        return (tk->type = TK_AS);
     case '&':
-        if (lex_match(self, '&'))
-            return TK_LAND;
-        if (lex_match(self, '='))
-            return TK_AND_AS;
-        return TK_AND;
+        if (match(self, tk, '&'))
+            return (tk->type = TK_LAND);
+        if (match(self, tk, '='))
+            return (tk->type = TK_AND_AS);
+        return (tk->type = TK_AND);
     case '^':
-        if (lex_match(self, '='))
-            return TK_XOR_AS;
-        return TK_XOR;
+        if (match(self, tk, '='))
+            return (tk->type = TK_XOR_AS);
+        return (tk->type = TK_XOR);
     case '|':
-        if (lex_match(self, '|'))
-            return TK_LOR;
-        if (lex_match(self, '='))
-            return TK_OR_AS;
-        return TK_OR;
+        if (match(self, tk, '|'))
+            return (tk->type = TK_LOR);
+        if (match(self, tk, '='))
+            return (tk->type = TK_OR_AS);
+        return (tk->type = TK_OR);
     case '#':
-        if (lex_match(self, '#'))
-            return TK_PASTE;
-        return TK_HASH;
+        if (match(self, tk, '#'))
+            return (tk->type = TK_PASTE);
+        return (tk->type = TK_HASH);
     // Unknown character
     default:
-        return TK_ERROR;
+        return (tk->type = TK_ERROR);
     }
-}
-
-tk_t *lex_tok(lexer_t *self, int i)
-{
-    // Make sure lookahead doesn't go too far
-    assert(i < LEX_TK_CNT);
-
-    // Add tokens until we have enough
-    while (self->tk_cnt <= i) {
-        self->tk = self->tk_buf + (self->tk_pos + self->tk_cnt++) % LEX_TK_CNT;
-        self->tk->type = lex_next(self);
-    }
-
-    // Return pointer to i-th token
-    return self->tk_buf + (self->tk_pos + i) % LEX_TK_CNT;
-}
-
-void lex_adv(lexer_t *self)
-{
-    // Make sure the buffer is not empty
-    assert(self->tk_cnt > 0);
-
-    // Skip over the front token
-    self->tk_pos = (self->tk_pos + 1) % LEX_TK_CNT;
-    --self->tk_cnt;
 }

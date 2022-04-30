@@ -3,8 +3,8 @@
 CC3 is a work-in-progress compiler from C99 (ISO/IEC 9899:1999) to AMD64.
 It can compile itself using an external pre-processor.
 
-It's current state is a result of ~3 weeks of work, with the main goal of
-compiling itself. There are many TODOs:
+Its current state is a result of ~3 weeks of work, the main goal in this period
+was compiling itself, as a result there are many TODOs:
 - Integrated pre-processor
 - Any support for floating point types
 - Type checking other then where strictly necessary for semantics
@@ -22,7 +22,7 @@ compiling itself. There are many TODOs:
 
 For compatibility with glibc's headers and general ergonomics, the following
 GNU extensions are supported on top of standard:
-- Statement expression (used by glibc)
+- Statement expressions (used by glibc)
 - Alternative spelling of inline as __inline (used by glibc)
 - Anonymous structs/unions (used by glibc and the compiler itself)
 - Case ranges in switches (used by the compiler itself)
@@ -35,42 +35,50 @@ inappropriate places, but these are clearly labeled and fixing them is a
 future goal.
 
 The compiler itself has 4 main modules:
+
 - lex.c: Lexical analyzer (hand written)
+
+    The lexical analyzer reads input from a file descriptor and does its own
+    buffering to allow cheap forward peeking. Its interface is a single step
+    iterator, it produces tokens using an output parameter.
+
 - parse.c: Recursive-descent parser (hand written)
+
+    The parser is a relatively clean, textbook, predictive recursive descent
+    parser. It uses an internal FIFO to allow for two tokens of lookahead.
+    If we ignore its entanglement with context information required to resolve
+    typedef-name ambiguities, it is essentially an LL(2) parser.
+
+    The parsing of expressions and statements roughly matches the standard
+    grammar, and produces an AST. Since scoping is done by the semantic
+    analyzer, nested block statements are not represented in the AST.
+
+    Declarations are parsed in a much more ad-hoc fashion. No AST is produced
+    (other than for types), and direct calls are made to the semantic analyzer.
+    Then the resulting semantic information feeds back to the parser to resolve
+    typedef-name ambiguities.
+
 - sema.c: Semantic analyzer
+
+    The semantic analyzer handles, scoping, declarations, and type checking.
+
+    Scoping and declarations are handled through callbacks from the parser.
+
+    Type checking is done through providing constructors for expressions,
+    statements, and initializers. These type check their arguments, then return
+    the constructed object containing these arguments.
+
 - gen.c: Code generator
 
-The lexical analyzer reads input using a C FILE I/O handle and does it's own
-buffering to allow cheap forward peeking. It's interface provides a view of the
-next two tokens of output, that can be advanced forward one token at a time.
+    Finally the code generator takes the AST constructed by the parser,
+    and walks it using a set of recursive procedures. Different procedures
+    are used based on what context expressions appear in, lvalue-, rvalue-,
+    and boolean expressions all generate different code.
 
-The parser is a relatively clean, textbook, predictive recursive descent parser.
-It uses the interface above to choose productions based on the two tokens of
-look-ahead. When the appropriate production is determined it calls the function
-corresponding to the chosen production. The parsing of expressions and
-statements roughly matches the standard grammar. Declarations and declarators
-less so, the functions parsing these are quite hacky and intertwined with
-semantic analysis, this is required as C is everything but a clean context free
-language in this regard. The parser's output is two-fold, for scoping and
-declarations it hands off to the semantic analyzer. For expressions and
-statements it constructs an AST with the help of the semantic analyzer for
-type checking.
-
-The semantic analyzer handles, scoping, declarations, and type checking.
-Scoping and declarations are handled through callbacks from the parser.
-Type checking is done through providing constructors for expressions,
-statements, and initializers. These type check their arguments, then return the
-constructed object containing these arguments. Since scoping is done by the
-semantic analyzer, the parser flattens block scopes and these are not
-represented in the AST of statements.
-
-Finally the code generator takes the AST constructed by the parser, and walks
-it using a set of recursive procedures. Different procedures are used based on
-what context certain things appear, e.g. lvalue expression, boolean expression,
-and rvalue expressions need different code. It generates output treating AMD64
-as a simplistic stack machine, and tree nodes are matched with instruction
-templates pretty much 1-to-1. The generated code is quite awful and a lot slower
-then an optimizing compiler.
+    It generates output treating AMD64 as a simplistic stack machine, tree
+    nodes are matched one-to-one with instruction templates. This makes the
+    code generator quite straightforward, however the generated code can be
+    orders of a magnitude slower then a modern optimizing compiler.
 
 # Future plans
 

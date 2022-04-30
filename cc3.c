@@ -2,21 +2,7 @@
 
 #include "cc3.h"
 
-static void cc3_init(cc3_t *ctx, int in_fd)
-{
-    lex_init(&ctx->lexer, in_fd);
-    sema_init(&ctx->sema);
-    gen_init(&ctx->gen);
-}
-
-static void cc3_free(cc3_t *ctx)
-{
-    lex_free(&ctx->lexer);
-    sema_free(&ctx->sema);
-    gen_free(&ctx->gen);
-}
-
-static void cc3_write_asm(cc3_t *ctx, int outfd)
+static void write_asm(cc3_t *ctx, int outfd)
 {
     // Generate text and data section
     dprintf(outfd, "section .text\n%s", ctx->gen.code.data);
@@ -58,7 +44,7 @@ static int do_assemble(cc3_t *ctx, char *out_path)
         return -1;
 
     // Generate assembly
-    cc3_write_asm(ctx, asm_fd);
+    write_asm(ctx, asm_fd);
 
     // Assemble
     char *args[] = { "nasm", "-felf64", "-o", out_path, asm_path, NULL };
@@ -134,14 +120,14 @@ int main(int argc, char **argv)
     cc3_init(&ctx, in_fd);
 
     // Parse file
-    parse(&ctx);
+    cc3_parse(&ctx);
 
     // Perform the actions requested by the user
     if (opt_S) {
         int out_fd = open(output_path, O_CREAT | O_WRONLY, 0666);
         if (out_fd < 0)
             goto err;
-        cc3_write_asm(&ctx, out_fd);
+        write_asm(&ctx, out_fd);
         close(out_fd);
     } else if (opt_c) {
         if (do_assemble(&ctx, output_path) < 0)
