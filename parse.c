@@ -905,111 +905,107 @@ static void type_qualifier_list(cc3_t *self)
 
 static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
 {
-    for (;;) {
-        /** Array declarator **/
-        if (maybe_want(self, TK_LSQ)) {
-            // Function argument declared as arrays (really pointers) can be
-            // qualified like normal pointers
-            // Additionally static can be provided as an optimization hint,
-            // we can just ignore this for now
-            type_qualifier_list(self);
-            maybe_want(self, TK_STATIC);
-            type_qualifier_list(self);
+    /** Array declarator **/
+    if (maybe_want(self, TK_LSQ)) {
+        // Function argument declared as arrays (really pointers) can be
+        // qualified like normal pointers
+        // Additionally static can be provided as an optimization hint,
+        // we can just ignore this for now
+        type_qualifier_list(self);
+        maybe_want(self, TK_STATIC);
+        type_qualifier_list(self);
 
-            int cnt = -1;
-            // We only allow constant array lengths, as VLA support is left out
-            if (!maybe_want(self, TK_RSQ)) {
-                cnt = constant_expression(self);
-                want(self, TK_RSQ);
-            }
-
-            ty = make_array(ty, cnt);
-            continue;
+        int cnt = -1;
+        // We only allow constant array lengths, as VLA support is left out
+        if (!maybe_want(self, TK_RSQ)) {
+            cnt = constant_expression(self);
+            want(self, TK_RSQ);
         }
 
-        /** Function declarator **/
-        if (maybe_want(self, TK_LPAREN)) {
+        return make_array(declarator_suffixes(self, ty), cnt);
+    }
+
+    /** Function declarator **/
+    if (maybe_want(self, TK_LPAREN)) {
 
 #if 0
-            // FIXME: K&R identifier list (including an empty one)
-            if (maybe_want(self, TK_RPAREN)) {
-                // NOTE: K&R functions are marked varargs with no parameters
-                ty = make_function(ty, NULL, true);
-                continue;
-            }
-
-            if (maybe_want(self, TK_IDENTIFIER)) {
-                while (maybe_want(self, TK_COMMA))
-                    want(self, TK_IDENTIFIER);
-                want(self, TK_RPAREN);
-
-                ty = make_function(ty, NULL, true);
-                continue;
-            }
-#endif
-            // Prototypes have their own scope
-            sema_enter(&self->sema);
-
-            // Then we can start reading the parameters
-            param_t *params = NULL, **tail = &params;
-            bool var = false;
-
-            if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
-                // "void" as the only unnamed parameter means no parameters
-                adv(self);
-                adv(self);
-            } else {
-                for (;;) {
-                    // Read parameter type
-                    int sc;
-                    ty_t *ty;
-                    char *name;
-                    if (!(ty = declaration_specifiers(self, &sc)))
-                        err("Expected declaration instead of %t", peek(self, 0));
-                    ty = declarator(self, ty, true, &name);
-
-                    // Adjust parameter type as appropriate
-                    switch (ty->kind) {
-                    case TY_VOID:
-                        err("Parameter type cannot be void");
-                    case TY_ARRAY:
-                        ty = make_pointer(ty->array.elem_ty);
-                        break;
-                    case TY_FUNCTION:
-                        ty = make_pointer(ty);
-                        break;
-                    }
-
-                    // Declare symbol if named
-                    sym_t *sym = NULL;
-                    if (name)
-                        sym = sema_declare(&self->sema, sc, ty, name);
-
-                    // Append parameter to the list
-                    *tail = make_param(ty, sym);
-                    tail = &(*tail)->next;
-
-                    // If there is no comma the end was reached
-                    if (!maybe_want(self, TK_COMMA))
-                        break;
-
-                    // Otherwise we check for ...
-                    if (maybe_want(self, TK_ELLIPSIS)) {
-                        var = true;
-                        break;
-                    }
-                }
-
-                want(self, TK_RPAREN);
-            }
-
-            ty = make_function(ty, sema_pop(&self->sema), params, var);
+        // FIXME: K&R identifier list (including an empty one)
+        if (maybe_want(self, TK_RPAREN)) {
+            // NOTE: K&R functions are marked varargs with no parameters
+            ty = make_function(ty, NULL, true);
             continue;
         }
 
-        /** Not a valid suffix -> we're done **/
-        return ty;
+        if (maybe_want(self, TK_IDENTIFIER)) {
+            while (maybe_want(self, TK_COMMA))
+                want(self, TK_IDENTIFIER);
+            want(self, TK_RPAREN);
+
+            ty = make_function(ty, NULL, true);
+            continue;
+        }
+#endif
+        // Prototypes have their own scope
+        sema_enter(&self->sema);
+
+        // Then we can start reading the parameters
+        param_t *params = NULL, **tail = &params;
+        bool var = false;
+
+        if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
+            // "void" as the only unnamed parameter means no parameters
+            adv(self);
+            adv(self);
+        } else {
+            for (;;) {
+                // Read parameter type
+                int sc;
+                ty_t *ty;
+                char *name;
+                if (!(ty = declaration_specifiers(self, &sc)))
+                    err("Expected declaration instead of %t", peek(self, 0));
+                ty = declarator(self, ty, true, &name);
+
+                // Adjust parameter type as appropriate
+                switch (ty->kind) {
+                case TY_VOID:
+                    err("Parameter type cannot be void");
+                case TY_ARRAY:
+                    ty = make_pointer(ty->array.elem_ty);
+                    break;
+                case TY_FUNCTION:
+                    ty = make_pointer(ty);
+                    break;
+                }
+
+                // Declare symbol if named
+                sym_t *sym = NULL;
+                if (name)
+                    sym = sema_declare(&self->sema, sc, ty, name);
+
+                // Append parameter to the list
+                *tail = make_param(ty, sym);
+                tail = &(*tail)->next;
+
+                // If there is no comma the end was reached
+                if (!maybe_want(self, TK_COMMA))
+                    break;
+
+                // Otherwise we check for ...
+                if (maybe_want(self, TK_ELLIPSIS)) {
+                    var = true;
+                    break;
+                }
+            }
+
+            want(self, TK_RPAREN);
+        }
+
+        return make_function(declarator_suffixes(self, ty),
+            sema_pop(&self->sema), params, var);
     }
+
+    return ty;
 }
 
 ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract,
