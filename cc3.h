@@ -356,8 +356,8 @@ scope_t *sema_pop(sema_t *self);
 
 // Declare a name
 sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name);
-// Finalize declaration after its initialize
-void sema_declare_end(sema_t *self, sym_t *sym);
+// Callback for local variable allocation
+void sema_alloc_local(sema_t *self, sym_t *sym);
 // Declare an enumeration constant
 sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val);
 // Lookup a declaration in any scope

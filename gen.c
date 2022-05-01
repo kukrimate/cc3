@@ -2,6 +2,13 @@
 
 #include "cc3.h"
 
+/** Argument to register mappings **/
+
+static const char *barg[] = { "dil", "sil", "dl", "cl", "r8b", "r9b" };
+static const char *warg[] = { "di", "si", "dx", "cx", "r8w", "r9w" };
+static const char *dwarg[] = { "edi", "esi", "edx", "ecx", "r8d", "r9d" };
+static const char *qwarg[] = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" };
+
 /** Context for jumps **/
 
 typedef struct case_label case_label_t;
@@ -315,8 +322,6 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
     case EXPR_CALL:
     {
-        static const char *qw[] = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" };
-
         // Generate arguments
         int cnt = 0;
         for (expr_t *arg = expr->as_binary.rhs; arg; arg = arg->next) {
@@ -327,7 +332,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         // Move them to registers
         assert(cnt < 6);
         while (cnt)
-            emit_code(self, "pop %s\n", qw[--cnt]);
+            emit_code(self, "pop %s\n", qwarg[--cnt]);
 
         // Generate call target
         gen_value(self, jmp_ctx, expr->as_binary.lhs);
@@ -843,32 +848,27 @@ static void gen_param_spill(gen_t *self, ty_t *ty, int offset, int i)
 {
     assert(i < 6);
 
-    static const char *byte[] = { "dil", "sil", "dl", "cl", "r8b", "r9b" };
-    static const char *word[] = { "di", "si", "dx", "cx", "r8w", "r9w" };
-    static const char *dw[] = { "edi", "esi", "edx", "ecx", "r8d", "r9d" };
-    static const char *qw[] = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" };
-
     switch (ty->kind) {
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
     case TY_BOOL:
-        emit_code(self, "mov byte [rbp - %d], %s\n", self->offset - offset, byte[i]);
+        emit_code(self, "mov byte [rbp - %d], %s\n", self->offset - offset, barg[i]);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "mov word [rbp - %d], %s\n", self->offset - offset, word[i]);
+        emit_code(self, "mov word [rbp - %d], %s\n", self->offset - offset, warg[i]);
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - offset, dw[i]);
+        emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - offset, dwarg[i]);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "mov qword [rbp - %d], %s\n", self->offset - offset, qw[i]);
+        emit_code(self, "mov qword [rbp - %d], %s\n", self->offset - offset, qwarg[i]);
         break;
     default:
         ASSERT_NOT_REACHED();

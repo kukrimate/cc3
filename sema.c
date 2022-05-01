@@ -81,6 +81,16 @@ ty_t *make_pointer(ty_t *base_ty)
 
 ty_t *make_array(ty_t *elem_ty, int cnt)
 {
+    if (elem_ty->kind == TY_VOID)
+        err("Array of void");
+    if (elem_ty->kind == TY_ARRAY && elem_ty->array.cnt == -1)
+        err("Array of incomplete array %T", elem_ty);
+    if (elem_ty->kind == TY_STRUCT || elem_ty->kind == TY_STRUCT)
+        if (!elem_ty->as_aggregate.members)
+            err("Array of incomplete aggregate %T", elem_ty);
+    if (elem_ty->kind == TY_FUNCTION)
+        err("Array cannot contain function %T", elem_ty);
+
     ty_t *ty = make_ty(TY_ARRAY);
     ty->array.elem_ty = elem_ty;
     ty->array.cnt = cnt;
@@ -89,11 +99,15 @@ ty_t *make_array(ty_t *elem_ty, int cnt)
 
 ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var)
 {
+    if (ret_ty->kind == TY_ARRAY)
+        err("Function returning array %T", ret_ty);
+    if (ret_ty->kind == TY_STRUCT || ret_ty->kind == TY_STRUCT)
+        if (!ret_ty->as_aggregate.members)
+            err("Function returning incomplete aggregate %T", ret_ty);
+    if (ret_ty->kind == TY_FUNCTION)
+        err("Function returning function %T", ret_ty);
+
     ty_t *ty = make_ty(TY_FUNCTION);
-
-    if (ret_ty->kind == TY_ARRAY || ret_ty->kind == TY_FUNCTION)
-        err("Function cannot return %T", ret_ty);
-
     ty->function.ret_ty = ret_ty;
     ty->function.scope = scope;
     ty->function.params = params;
@@ -184,6 +198,7 @@ void print_ty(ty_t *ty)
         break;
 
     default:
+        printf("%d\n", ty->kind);
         ASSERT_NOT_REACHED();
     }
 }
@@ -408,15 +423,15 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     return sym;
 }
 
-void sema_declare_end(sema_t *self, sym_t *sym)
+void sema_alloc_local(sema_t *self, sym_t *sym)
 {
-    if (sym->kind == SYM_LOCAL) {
-        // First align the stack
-        self->offset = align(self->offset, ty_align(sym->ty));
-        // Then we can allocate space for the variable
-        sym->offset = self->offset;
-        self->offset += ty_size(sym->ty);
-    }
+    assert(sym->kind == SYM_LOCAL);
+
+    // First align the stack
+    self->offset = align(self->offset, ty_align(sym->ty));
+    // Then we can allocate space for the variable
+    sym->offset = self->offset;
+    self->offset += ty_size(sym->ty);
 }
 
 sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val)

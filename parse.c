@@ -80,6 +80,21 @@ static inline tk_t *maybe_want(cc3_t *self, int want_type)
     return NULL;
 }
 
+/** Syntax helpers **/
+
+// Check for the end of a comma seperated list enclosed in braces
+static bool end_comma_separated(cc3_t *self)
+{
+    if (maybe_want(self, TK_COMMA)) {
+        if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
+            return true;
+    } else {
+        want(self, TK_RCURLY);              // Otherwise the list must end
+        return true;
+    }
+    return false;
+}
+
 /** Expressions **/
 
 static expr_t *primary_expression(cc3_t *self);
@@ -224,7 +239,7 @@ expr_t *postfix_expression(cc3_t *self)
     }
 }
 
-static bool is_declaration_specifier(cc3_t *self, tk_t *tk);
+static bool is_type_name(cc3_t *self, tk_t *tk);
 
 expr_t *unary_expression(cc3_t *self)
 {
@@ -250,8 +265,7 @@ expr_t *unary_expression(cc3_t *self)
         return make_unary(EXPR_LNOT, cast_expression(self));
     } else if (maybe_want(self, TK_SIZEOF)) {
         ty_t *ty;
-        if (peek(self, 0)->type == TK_LPAREN
-                && is_declaration_specifier(self, peek(self, 1))) {
+        if (peek(self, 0)->type == TK_LPAREN && is_type_name(self, peek(self, 1))) {
             // sizeof '(' type-name ')'
             adv(self);
             ty = type_name(self);
@@ -268,8 +282,7 @@ expr_t *unary_expression(cc3_t *self)
 
 expr_t *cast_expression(cc3_t *self)
 {
-    if (peek(self, 0)->type == TK_LPAREN
-                && is_declaration_specifier(self, peek(self, 1))) {
+    if (peek(self, 0)->type == TK_LPAREN && is_type_name(self, peek(self, 1))) {
         // '(' type-name ')' cast-expression
         adv(self);
         ty_t *ty = type_name(self);
@@ -475,31 +488,23 @@ end:
 }
 #endif
 
-// Check for the end of a comma seperated list enclosed in braces
-static bool end_comma_separated(cc3_t *self)
-{
-    if (maybe_want(self, TK_COMMA)) {
-        if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
-            return true;
-    } else {
-        want(self, TK_RCURLY);              // Otherwise the list must end
-        return true;
-    }
-    return false;
-}
-
-static init_t *initializer(cc3_t *self)
+static init_t *initializer_r(cc3_t *self)
 {
     if (maybe_want(self, TK_LCURLY)) {
         init_t *head, **tail = &head;
         do {
-            *tail = initializer(self);
+            *tail = initializer_r(self);
             tail = &(*tail)->next;
         } while (!end_comma_separated(self));
         return make_init_list(head);
     } else {
         return make_init_expr(assignment_expression(self));
     }
+}
+
+static init_t *initializer(cc3_t *self, ty_t *ty)
+{
+    return bind_init(ty, initializer_r(self));
 }
 
 /** Declarations **/
@@ -843,52 +848,6 @@ set_match:
     }
 }
 
-static bool is_declaration_specifier(cc3_t *self, tk_t *tk)
-{
-    switch (tk->type) {
-
-    // Storage class
-    case TK_TYPEDEF:
-    case TK_EXTERN:
-    case TK_STATIC:
-    case TK_AUTO:
-    case TK_REGISTER:
-
-    // Type qualifier
-    case TK_CONST:
-    case TK_RESTRICT:
-    case TK_VOLATILE:
-
-    // Function specifier
-    case TK_INLINE:
-
-    // Type specifier
-    case TK_VOID:
-    case TK_CHAR:
-    case TK_SHORT:
-    case TK_INT:
-    case TK_LONG:
-    case TK_FLOAT:
-    case TK_DOUBLE:
-    case TK_SIGNED:
-    case TK_UNSIGNED:
-    case TK_BOOL:
-    case TK_COMPLEX:
-    case TK_IMAGINARY:
-    case TK_STRUCT:
-    case TK_UNION:
-    case TK_ENUM:
-        return true;
-
-    // Might be a typedef name
-    case TK_IDENTIFIER:
-        return sema_findtypedef(&self->sema, tk_str(tk)) != NULL;
-
-    default:
-        return false;
-    }
-}
-
 static void type_qualifier_list(cc3_t *self)
 {
     for (;;)
@@ -1049,6 +1008,52 @@ ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract,
     return declarator_suffixes(self, ty);
 }
 
+static bool is_type_name(cc3_t *self, tk_t *tk)
+{
+    switch (tk->type) {
+
+    // Storage class
+    case TK_TYPEDEF:
+    case TK_EXTERN:
+    case TK_STATIC:
+    case TK_AUTO:
+    case TK_REGISTER:
+
+    // Type qualifier
+    case TK_CONST:
+    case TK_RESTRICT:
+    case TK_VOLATILE:
+
+    // Function specifier
+    case TK_INLINE:
+
+    // Type specifier
+    case TK_VOID:
+    case TK_CHAR:
+    case TK_SHORT:
+    case TK_INT:
+    case TK_LONG:
+    case TK_FLOAT:
+    case TK_DOUBLE:
+    case TK_SIGNED:
+    case TK_UNSIGNED:
+    case TK_BOOL:
+    case TK_COMPLEX:
+    case TK_IMAGINARY:
+    case TK_STRUCT:
+    case TK_UNION:
+    case TK_ENUM:
+        return true;
+
+    // Might be a typedef name
+    case TK_IDENTIFIER:
+        return sema_findtypedef(&self->sema, tk_str(tk)) != NULL;
+
+    default:
+        return false;
+    }
+}
+
 static ty_t *type_name(cc3_t *self)
 {
     int sc;
@@ -1092,23 +1097,22 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
             // Trigger semantic action
             sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
-            if (maybe_want(self, TK_AS)) {
-                // Read initializer
-                init_t *init = bind_init(sym->ty, initializer(self));
-
-                // Add local initialization "statement" if the target is local
-                if (sym->kind == SYM_LOCAL) {
+            if (sym->kind == SYM_LOCAL) {
+                if (maybe_want(self, TK_AS)) {
+                    // Local initializers are intermixed with code and
+                    // represented in our AST
                     stmt_t *stmt = make_stmt(STMT_INIT);
                     stmt->as_init.sym = sym;
-                    stmt->as_init.value = init;
+                    stmt->as_init.value = initializer(self, sym->ty);
                     append_stmt(tail, stmt);
-                } else {
-                    gen_static(&self->gen, sym, init);
+                }
+                sema_alloc_local(&self->sema, sym);
+            } else {
+                if (maybe_want(self, TK_AS)) {
+                    // Static initializers get generated in the .data section
+                    gen_static(&self->gen, sym, initializer(self, sym->ty));
                 }
             }
-
-            sema_declare_end(&self->sema, sym);
-
         } while (maybe_want(self, TK_COMMA));
         // Declarators must end with ;
         want(self, TK_SEMICOLON);
@@ -1322,78 +1326,80 @@ static stmt_t *read_block(cc3_t *self)
     return head;
 }
 
-void cc3_parse(cc3_t *self)
+static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
 {
-    int sc;
-    ty_t *base_ty;
+    sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
-    while ((base_ty = declaration_specifiers(self, &sc))) {
-        if (!maybe_want(self, TK_SEMICOLON)) {
-            // Read first declarator
-            char *name;
-            ty_t *ty = declarator(self, base_ty, false, &name);
-            // Trigger semantic action
-            sym_t *sym = sema_declare(&self->sema, sc, ty, name);
+    // Check for function definition
+    // Make sure it is really a function
+    if (ty->kind != TY_FUNCTION)
+        err("Expected function type instead of %T", ty);
 
-            // Check for function definition
-            if (maybe_want(self, TK_LCURLY)) {
-                // Make sure it is really a function
-                if (ty->kind != TY_FUNCTION)
-                    err("Expected function type instead of %T", ty);
+    // Mark the symbol as having a definition
+    sym->had_def = true;
 
-                // Mark the symbol as having a definition
-                sym->had_def = true;
+    // HACK!: zero sema's picture of the frame size before
+    // entering the context of a new function
+    self->sema.func_name = sym->name;
+    self->sema.offset = 0;
 
-                // HACK!: zero sema's picture of the frame size before
-                // entering the context of a new function
-                self->sema.func_name = sym->name;
-                self->sema.offset = 0;
+    // NOTE: if we are dealing with a varargs function, we *must*
+    // leave 48 bytes as a register save area
+    if (ty->function.var)
+        self->sema.offset = 48;
 
-                // NOTE: if we are dealing with a varargs function, we *must*
-                // leave 48 bytes as a register save area
-                if (ty->function.var)
-                    self->sema.offset = 48;
-
-                // Now we can allocate space in the stack frame for the
-                // parameters of the current function
-                for (param_t *param = ty->function.params; param; param = param->next) {
-                    if (!param->sym)
-                        err("Unnamed parameters are not allowed in function definitions");
-                    self->sema.offset = align(self->sema.offset, ty_align(param->ty));
-                    param->sym->offset = self->sema.offset;
-                    self->sema.offset += ty_size(param->ty);
-                }
-
-                // Bring parameters into scope for parsing the function body
-                sema_push(&self->sema, ty->function.scope);
-                stmt_t *body = read_block(self);
-                sema_exit(&self->sema);
-
-                // Then we can generate the function, providing the correct
-                // frame size from the hack above
-                gen_func(&self->gen, sym, self->sema.offset, body);
-            } else {
-                // If it's not a function it might have an initializer
-                if (maybe_want(self, TK_AS))
-                    initializer(self);
-
-                // And further declarations might follow
-                while (maybe_want(self, TK_COMMA)) {
-                    char *name;
-                    ty_t *ty = declarator(self, base_ty, false, &name);
-
-                    // Trigger semantic action
-                    sema_declare(&self->sema, sc, ty, name);
-
-                    if (maybe_want(self, TK_AS))
-                        initializer(self);
-                }
-
-                // The list must end with a ;
-                want(self, TK_SEMICOLON);
-            }
-        }
+    // Now we can allocate space in the stack frame for the
+    // parameters of the current function
+    for (param_t *param = ty->function.params; param; param = param->next) {
+        if (!param->sym)
+            err("Unnamed parameters are not allowed in function definitions");
+        self->sema.offset = align(self->sema.offset, ty_align(param->ty));
+        param->sym->offset = self->sema.offset;
+        self->sema.offset += ty_size(param->ty);
     }
 
+    // Bring parameters into scope for parsing the function body
+    sema_push(&self->sema, ty->function.scope);
+    stmt_t *body = read_block(self);
+    sema_exit(&self->sema);
+
+    // Then we can generate the function, providing the correct
+    // frame size from the hack above
+    gen_func(&self->gen, sym, self->sema.offset, body);
+}
+
+static void external_declaration(cc3_t *self, int sc, ty_t *ty, char *name)
+{
+    sym_t *sym = sema_declare(&self->sema, sc, ty, name);
+
+    if (maybe_want(self, TK_AS))
+        gen_static(&self->gen, sym, initializer(self, sym->ty));
+}
+
+void cc3_parse(cc3_t *self)
+{
+    for (;;) {
+        int sc;
+        ty_t *base_ty = declaration_specifiers(self, &sc);
+        if (!base_ty)                                       // End of file
+            break;
+        if (maybe_want(self, TK_SEMICOLON))                 // No names declared
+            continue;
+
+        char *name;
+        ty_t *ty = declarator(self, base_ty, false, &name);
+
+        if (maybe_want(self, TK_LCURLY)) {                  // function-definition
+            function_definition(self, sc, ty, name);
+        } else {                                            // external-declaration
+            external_declaration(self, sc, ty, name);
+            while (maybe_want(self, TK_COMMA)) {
+                char *name;
+                ty_t *ty = declarator(self, base_ty, false, &name);
+                external_declaration(self, sc, ty, name);
+            }
+            want(self, TK_SEMICOLON);
+        }
+    }
     want(self, TK_EOF);
 }
