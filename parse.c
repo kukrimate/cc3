@@ -272,9 +272,9 @@ expr_t *cast_expression(cc3_t *self)
                 && is_declaration_specifier(self, peek(self, 1))) {
         // '(' type-name ')' cast-expression
         adv(self);
-        type_name(self);
+        ty_t *ty = type_name(self);
         want(self, TK_RPAREN);
-        return cast_expression(self); // FIXME: represent cast in the AST
+        return make_cast_expr(ty, cast_expression(self));
     } else {
         return unary_expression(self);
     }

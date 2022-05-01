@@ -389,6 +389,8 @@ enum {
     EXPR_REF,   // Pointer creation
     EXPR_DREF,  // Pointer indirection
 
+    EXPR_CAST,  // Type conversion
+
     EXPR_NEG,   // Unary arithmetic
     EXPR_NOT,
 
@@ -475,6 +477,7 @@ expr_t *make_const(ty_t *ty, val_t value);
 expr_t *make_str_lit(const char *str);
 
 expr_t *make_memb_expr(expr_t *aggr, const char *name);
+expr_t *make_cast_expr(ty_t *ty, expr_t *arg);
 
 expr_t *make_unary(int kind, expr_t *arg);
 expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs);

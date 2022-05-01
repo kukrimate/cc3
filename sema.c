@@ -597,6 +597,18 @@ expr_t *make_memb_expr(expr_t *aggr, const char *name)
     return expr;
 }
 
+expr_t *make_cast_expr(ty_t *ty, expr_t *arg)
+{
+    if (arg->kind == EXPR_CONST) {
+        arg->ty = ty;
+        return arg;
+    }
+
+    expr_t *expr = make_expr(EXPR_CAST);
+    expr->ty = ty;
+    expr->as_unary.arg = arg;
+    return expr;
+}
 
 // Does a value of type ty degrade to a pointer type and if so what is the base
 // type of said pointer?

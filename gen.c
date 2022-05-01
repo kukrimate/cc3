@@ -355,6 +355,10 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         gen_addr(self, jmp_ctx, expr->as_unary.arg);
         break;
 
+    case EXPR_CAST:
+        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        break;
+
     case EXPR_NEG:
         gen_value(self, jmp_ctx, expr->as_unary.arg);
         emit_code(self, "neg rax\n");
