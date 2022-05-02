@@ -530,26 +530,22 @@ static memb_t *member_list(cc3_t *self)
                 if (maybe_want(self, TK_COLON)) {
                     constant_expression(self);
                     continue;
-                }
-                */
+                }*/
 
                 char *name;
                 ty_t *ty = declarator(self, base_ty, false, &name);
 
                 /* FIXME: bitfield
                 if (maybe_want(self, TK_COLON))
-                    constant_expression(self);
-                */
+                    constant_expression(self);*/
 
-                // Append member
                 *tail = make_memb(ty, name);
                 tail = &(*tail)->next;
             } while (maybe_want(self, TK_COMMA));   // Another declarator after ,
             want(self, TK_SEMICOLON);               // Must end with ;
         } else {
             // [GNU] An anonymous struct/union is allowed as a member
-            if ((base_ty->kind != TY_STRUCT && base_ty->kind != TY_UNION)
-                    || !base_ty->as_aggregate.members)
+            if (base_ty->kind != TY_STRUCT && base_ty->kind != TY_UNION)
                 err("Invalid anonymous member");
             *tail = make_memb(base_ty, NULL);
             tail = &(*tail)->next;
@@ -607,25 +603,15 @@ static void enumerator_list(cc3_t *self)
 {
     val_t cur = 0;
 
-    for (;; ++cur) {
+    do {
         // Read enumerator name
         char *name = strdup(tk_str(want(self, TK_IDENTIFIER)));
-
         // Optionally there might be a value
         if (maybe_want(self, TK_AS))
             cur = constant_expression(self);
-
         // Declare enumeration constant
-        sema_declare_enum_const(&self->sema, name, cur);
-
-        if (maybe_want(self, TK_COMMA)) {
-            if (maybe_want(self, TK_RCURLY))    // Trailing comma allowed
-                return;
-        } else {
-            want(self, TK_RCURLY);              // Otherwise the list must end
-            return;
-        }
-    }
+        sema_declare_enum_const(&self->sema, name, cur++);
+    } while (!end_comma_separated(self));
 }
 
 static void enum_specifier(cc3_t *self)
@@ -645,19 +631,21 @@ static void enum_specifier(cc3_t *self)
     }
 }
 
-enum {
-    TS_VOID, TS_CHAR, TS_SHORT, TS_INT, TS_LONG, TS_FLOAT, TS_DOUBLE,
-    TS_SIGNED, TS_UNSIGNED, TS_BOOL, TS_COMPLEX, TS_IMAGINARY, NUM_TS
-};
+/*
+ * Turn declaration specifiers into into an actual type
+ */
 
-// One of the ugliest part of C: this hand-written nightmare of a function
-// decodes the a multiset of type specifiers into an actual type
-static ty_t *decode_ts(int ts[static NUM_TS])
+ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
 {
+    enum {
+        TS_VOID, TS_CHAR, TS_SHORT, TS_INT, TS_LONG, TS_FLOAT, TS_DOUBLE,
+        TS_SIGNED, TS_UNSIGNED, TS_BOOL, TS_COMPLEX, TS_IMAGINARY, NUM_TS
+    };
+
     static const struct {
         int ts[NUM_TS];
         int kind;
-    } maps[] = {
+    } ts_map[] = {
         //  V  C  S  I  L  F  D  S  U  B  C  I
         { { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_VOID      },  // void
         { { 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_CHAR      },  // char
@@ -692,17 +680,6 @@ static ty_t *decode_ts(int ts[static NUM_TS])
         { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, }, TY_BOOL      },  // _Bool
     };
 
-    for (int i = 0; i < sizeof maps / sizeof *maps; ++i)
-        if (!memcmp(ts, maps[i].ts, sizeof maps[i].ts))
-            return make_ty(maps[i].kind);
-
-    err("Provided type specifiers do not name a valid type");
-}
-
-ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
-{
-    bool match = false;
-
     // Storage class
     *out_sc = -1;
 
@@ -724,8 +701,7 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
         case TK_STATIC:
         case TK_AUTO:
         case TK_REGISTER:
-            if (*out_sc != -1)
-                err("Duplicate storage class");
+            if (*out_sc != -1) goto err_sc;
             *out_sc = tk->type;
             break;
 
@@ -740,112 +716,76 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
             break;
 
         // Type specifier
-        case TK_VOID:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_VOID];
-            break;
-        case TK_CHAR:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_CHAR];
-            break;
-        case TK_SHORT:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_SHORT];
-            break;
-        case TK_INT:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_INT];
-            break;
-        case TK_LONG:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_LONG];
-            break;
-        case TK_FLOAT:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_FLOAT];
-            break;
-        case TK_DOUBLE:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_DOUBLE];
-            break;
-        case TK_SIGNED:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_SIGNED];
-            break;
-        case TK_UNSIGNED:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_UNSIGNED];
-            break;
-        case TK_BOOL:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_BOOL];
-            break;
-        case TK_COMPLEX:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_COMPLEX];
-            break;
-        case TK_IMAGINARY:
-            if (ty) err("Invalid type specifiers");
-            had_ts = true;
-            ++ts[TS_IMAGINARY];
-            break;
+        #define INCR_TS(idx)                        \
+            do {                                    \
+                if (ty) goto err_ts;                \
+                had_ts = true;                      \
+                ++ts[idx];                          \
+            } while (0)
+
+        case TK_VOID:       INCR_TS(TS_VOID);       break;
+        case TK_CHAR:       INCR_TS(TS_CHAR);       break;
+        case TK_SHORT:      INCR_TS(TS_SHORT);      break;
+        case TK_INT:        INCR_TS(TS_INT);        break;
+        case TK_LONG:       INCR_TS(TS_LONG);       break;
+        case TK_FLOAT:      INCR_TS(TS_FLOAT);      break;
+        case TK_DOUBLE:     INCR_TS(TS_DOUBLE);     break;
+        case TK_SIGNED:     INCR_TS(TS_SIGNED);     break;
+        case TK_UNSIGNED:   INCR_TS(TS_UNSIGNED);   break;
+        case TK_BOOL:       INCR_TS(TS_BOOL);       break;
+        case TK_COMPLEX:    INCR_TS(TS_COMPLEX);    break;
+        case TK_IMAGINARY:  INCR_TS(TS_IMAGINARY);  break;
+
+        #undef INCR_TS
+
         case TK_STRUCT:
-            if (ty || had_ts) err("Invalid type specifiers");
+            if (ty || had_ts) goto err_ts;
             adv(self);
             ty = struct_specifier(self);
-            goto set_match;
+            continue;
         case TK_UNION:
-            if (ty || had_ts) err("Invalid type specifiers");
+            if (ty || had_ts) goto err_ts;
             adv(self);
             ty = union_specifier(self);
-            goto set_match;
+            continue;
         case TK_ENUM:
-            if (ty || had_ts) err("Invalid type specifiers");
+            if (ty || had_ts) goto err_ts;
             adv(self);
             enum_specifier(self);
             ty = make_ty(TY_INT);
-            goto set_match;
+            continue;
 
-        // Might be a typedef name
         case TK_IDENTIFIER:
-            // If there were no type specifiers, we lookup the identifier
-            // to see if it's a typedef name
+            // Typedef name have to be the only type specifier present
             if (!ty && !had_ts)
                 if ((ty = sema_findtypedef(&self->sema, tk_str(tk))))
                     break;
 
-            // If it's not a typedef name we
             // FALLTHROUGH
 
-        // End of declaration specifiers
         default:
-
-            if (!match)             // No type provided
-                return NULL;
-
-            if (ty)                 // Struct, union, enum, or typedef
+            // Struct, union, enum, or typedef
+            if (ty)
                 return ty;
 
-            return decode_ts(ts);   // Otherwise it's a normal multiset
+            // Normal multiset of type specifiers
+            if (had_ts) {
+                for (int i = 0; i < ARRAY_SIZE(ts_map); ++i)
+                    if (!memcmp(ts, ts_map[i].ts, sizeof ts_map[i].ts))
+                        return make_ty(ts_map[i].kind);
+                goto err_ts;
+            }
+
+            // No type specifiers
+            return NULL;
         }
 
         // Consume token
         adv(self);
-set_match:
-        // Note that we've matched something
-        match = true;
     }
+
+    err_sc: err("Duplicate storage class");
+    err_ts: err("Invalid type specifiers");
 }
 
 static void type_qualifier_list(cc3_t *self)
@@ -862,150 +802,161 @@ static void type_qualifier_list(cc3_t *self)
         }
 }
 
-static ty_t *declarator_suffixes(cc3_t *self, ty_t *ty)
+typedef struct decl decl_t;
+
+enum {
+    DECL_NAME,
+    DECL_POINTER,
+    DECL_ARRAY,
+    DECL_FUNCTION,
+};
+
+struct decl {
+    decl_t *next;
+
+    int kind;
+
+    union {
+        char *as_name;
+
+        struct {
+            int cnt;
+        } as_array;
+
+        struct {
+            scope_t *scope;
+            param_t *params;
+            bool var;
+        } as_function;
+    };
+};
+
+static decl_t *make_decl(decl_t *next, int kind)
 {
-    /** Array declarator **/
-    if (maybe_want(self, TK_LSQ)) {
-        // Function argument declared as arrays (really pointers) can be
-        // qualified like normal pointers
-        // Additionally static can be provided as an optimization hint,
-        // we can just ignore this for now
-        type_qualifier_list(self);
-        maybe_want(self, TK_STATIC);
-        type_qualifier_list(self);
-
-        int cnt = -1;
-        // We only allow constant array lengths, as VLA support is left out
-        if (!maybe_want(self, TK_RSQ)) {
-            cnt = constant_expression(self);
-            want(self, TK_RSQ);
-        }
-
-        return make_array(declarator_suffixes(self, ty), cnt);
-    }
-
-    /** Function declarator **/
-    if (maybe_want(self, TK_LPAREN)) {
-
-#if 0
-        // FIXME: K&R identifier list (including an empty one)
-        if (maybe_want(self, TK_RPAREN)) {
-            // NOTE: K&R functions are marked varargs with no parameters
-            ty = make_function(ty, NULL, true);
-            continue;
-        }
-
-        if (maybe_want(self, TK_IDENTIFIER)) {
-            while (maybe_want(self, TK_COMMA))
-                want(self, TK_IDENTIFIER);
-            want(self, TK_RPAREN);
-
-            ty = make_function(ty, NULL, true);
-            continue;
-        }
-#endif
-        // Prototypes have their own scope
-        sema_enter(&self->sema);
-
-        // Then we can start reading the parameters
-        param_t *params = NULL, **tail = &params;
-        bool var = false;
-
-        if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
-            // "void" as the only unnamed parameter means no parameters
-            adv(self);
-            adv(self);
-        } else {
-            for (;;) {
-                // Read parameter type
-                int sc;
-                ty_t *ty;
-                char *name;
-                if (!(ty = declaration_specifiers(self, &sc)))
-                    err("Expected declaration instead of %t", peek(self, 0));
-                ty = declarator(self, ty, true, &name);
-
-                // Adjust parameter type as appropriate
-                switch (ty->kind) {
-                case TY_VOID:
-                    err("Parameter type cannot be void");
-                case TY_ARRAY:
-                    ty = make_pointer(ty->array.elem_ty);
-                    break;
-                case TY_FUNCTION:
-                    ty = make_pointer(ty);
-                    break;
-                }
-
-                // Declare symbol if named
-                sym_t *sym = NULL;
-                if (name)
-                    sym = sema_declare(&self->sema, sc, ty, name);
-
-                // Append parameter to the list
-                *tail = make_param(ty, sym);
-                tail = &(*tail)->next;
-
-                // If there is no comma the end was reached
-                if (!maybe_want(self, TK_COMMA))
-                    break;
-
-                // Otherwise we check for ...
-                if (maybe_want(self, TK_ELLIPSIS)) {
-                    var = true;
-                    break;
-                }
-            }
-
-            want(self, TK_RPAREN);
-        }
-
-        return make_function(declarator_suffixes(self, ty),
-            sema_pop(&self->sema), params, var);
-    }
-
-    return ty;
+    decl_t *decl = calloc(1, sizeof *decl);
+    if (!decl) abort();
+    decl->next = next;
+    decl->kind = kind;
+    return decl;
 }
 
-ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract,
-    char **out_name)
+static decl_t *declarator_r(cc3_t *self)
 {
-    // Read prefix
-    while (maybe_want(self, TK_MUL)) {
+    if (maybe_want(self, TK_MUL)) {                         // Pointer
         type_qualifier_list(self);
-        ty = make_pointer(ty);
-    }
-
-    // FIXME: in function declarators, only recurse if the follow set is
-    // *not* typedef-name ')'
-
-    if (maybe_want(self, TK_LPAREN)) {  // '(' declarator ')'
-        ty_t *dummy = calloc(1, sizeof *dummy);
-        ty_t *result = declarator(self, dummy, allow_abstract, out_name);
-        want(self, TK_RPAREN);
-
-        // Read suffixes
-        ty = declarator_suffixes(self, ty);
-
-        // The middle becomes the innermost declarator
-        *dummy = *ty;
-
-        return result;
+        return make_decl(declarator_r(self), DECL_POINTER);
     }
 
     tk_t *tk;
+    decl_t *decl;
 
-    if (allow_abstract) {
-        if ((tk = maybe_want(self, TK_IDENTIFIER)))
-            *out_name = strdup(tk_str(tk));
-        else
-            *out_name = NULL;
-    } else {
-        tk = want(self, TK_IDENTIFIER);
-        *out_name = strdup(tk_str(tk));
+    // FIXME: '(' typedef-name ')' is a function suffix not an IDENTIFIER
+
+    if (maybe_want(self, TK_LPAREN)) {                      // '(' declarator ')'
+        decl = declarator_r(self);
+        want(self, TK_RPAREN);
+    } else if ((tk = maybe_want(self, TK_IDENTIFIER))) {    // IDENTIFIER
+        decl = make_decl(NULL, DECL_NAME);
+        decl->as_name = strdup(tk_str(tk));
+    } else {                                                // Abstract
+        decl = NULL;
     }
 
-    return declarator_suffixes(self, ty);
+    for (;;)
+        if (maybe_want(self, TK_LSQ)) {                     // Array
+            type_qualifier_list(self);
+            maybe_want(self, TK_STATIC);
+            type_qualifier_list(self);
+            decl = make_decl(decl, DECL_ARRAY);
+            if (maybe_want(self, TK_RSQ)) {
+                decl->as_array.cnt = -1;
+            } else {
+                decl->as_array.cnt = constant_expression(self);
+                want(self, TK_RSQ);
+            }
+        } else if (maybe_want(self, TK_LPAREN)) {            // Function
+            decl = make_decl(decl, DECL_FUNCTION);
+            sema_enter(&self->sema);
+            if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
+                // "void" as the only unnamed parameter means no parameters
+                adv(self);
+                adv(self);
+            } else {
+                // Otherwise a parameter-type-list follows
+                for (param_t **tail = &decl->as_function.params;;) {
+                    int sc;
+                    ty_t *ty;
+                    char *name;
+                    if (!(ty = declaration_specifiers(self, &sc)))
+                        err("Expected declaration instead of %t", peek(self, 0));
+                    ty = declarator(self, ty, true, &name);
+                    // Adjust parameter type as appropriate
+                    switch (ty->kind) {
+                    case TY_VOID:
+                        err("Parameter type cannot be void");
+                    case TY_ARRAY:
+                        ty = make_pointer(ty->array.elem_ty);
+                        break;
+                    case TY_FUNCTION:
+                        ty = make_pointer(ty);
+                        break;
+                    }
+                    // Declare symbol if named
+                    sym_t *sym = NULL;
+                    if (name)
+                        sym = sema_declare(&self->sema, sc, ty, name);
+                    // Append parameter to the list
+                    *tail = make_param(ty, sym);
+                    tail = &(*tail)->next;
+                    // If there is no comma the end was reached
+                    if (!maybe_want(self, TK_COMMA))
+                        break;
+                    // Otherwise we check for ...
+                    if (maybe_want(self, TK_ELLIPSIS)) {
+                        decl->as_function.var = true;
+                        break;
+                    }
+                }
+                want(self, TK_RPAREN);
+            }
+            decl->as_function.scope = sema_pop(&self->sema);
+        } else {
+            return decl;
+        }
+}
+
+static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_name)
+{
+    // Iterate declarators until we reach a name
+    for (decl_t *decl = declarator_r(self); decl; decl = decl->next)
+        switch (decl->kind) {
+        case DECL_NAME:
+            *out_name = decl->as_name;
+            return ty;
+        case DECL_POINTER:
+            ty = make_pointer(ty);
+            break;
+        case DECL_ARRAY:
+            ty = make_array(ty, decl->as_array.cnt);
+            break;
+        case DECL_FUNCTION:
+            ty = make_function(ty,
+                    decl->as_function.scope,
+                    decl->as_function.params,
+                    decl->as_function.var);
+            break;
+        default:
+            ASSERT_NOT_REACHED();
+        }
+
+    // If there was no name it must be an abstract declarator
+    if (!allow_abstract)
+        err("Expected named declarator");
+
+    // We mark abstract declarators by setting the name to NULL
+    *out_name = NULL;
+
+    return ty;
 }
 
 static bool is_type_name(cc3_t *self, tk_t *tk)

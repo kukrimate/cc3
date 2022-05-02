@@ -49,14 +49,14 @@ The compiler itself has 4 main modules:
     If we ignore its entanglement with context information required to resolve
     typedef-name ambiguities, it is essentially an LL(2) parser.
 
-    The parsing of expressions and statements roughly matches the standard
-    grammar, and produces an AST. Since scoping is done by the semantic
-    analyzer, nested block statements are not represented in the AST.
+    Expressions and statements produce an AST. However scoping is done by the
+    semantic analyzer, thus nested block statements are not represented in it.
 
-    Declarations are parsed in a much more ad-hoc fashion. No AST is produced
-    (other than for types), and direct calls are made to the semantic analyzer.
-    Then the resulting semantic information feeds back to the parser to resolve
-    typedef-name ambiguities.
+    Declarations need semantic information to disambiguate typedef names from
+    idenitifiers. Additionally the syntax of C declarators is quite challanges
+    to parse in one pass, thus a temporary linked-list representing a declarator
+    is produced. Then it's walked in a second pass to construct the final type
+    of a declaration.
 
 - sema.c: Semantic analyzer
 

@@ -14,6 +14,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/** Size of an array in elements **/
+#define ARRAY_SIZE(array) (sizeof (array) / sizeof *(array))
+
 /** Enforce unreachability **/
 #define ASSERT_NOT_REACHED() assert(0)
 
