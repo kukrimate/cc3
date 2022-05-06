@@ -4,16 +4,10 @@
 
 static void write_asm(cc3_t *ctx, int outfd)
 {
-    // Generate text and data section
-    dprintf(outfd, "section .text\n%s", ctx->gen.code.data);
-    dprintf(outfd, "section .rodata\n%s", ctx->gen.lits.data);
-    dprintf(outfd, "section .data\n%s", ctx->gen.data.data);
-
-    // Generate imports and exports
-    for (sym_t *sym = ctx->sema.scope->syms; sym; sym = sym->next)
-        if (sym->kind == SYM_EXTERN)
-            dprintf(outfd, "%s %s\n",
-                sym->had_def ? "global" : "extern", sym->name);
+    // Output sections section
+    dprintf(outfd, ".text\n%s", ctx->gen.code.data);
+    dprintf(outfd, ".section .rodata\n%s", ctx->gen.lits.data);
+    dprintf(outfd, ".section .data\n%s", ctx->gen.data.data);
 }
 
 static int run_process(char **args)
@@ -47,7 +41,7 @@ static int do_assemble(cc3_t *ctx, char *out_path)
     write_asm(ctx, asm_fd);
 
     // Assemble
-    char *args[] = { "nasm", "-felf64", "-o", out_path, asm_path, NULL };
+    char *args[] = { "as", "-o", out_path, asm_path, NULL };
     int err = run_process(args);
 
     close(asm_fd);
@@ -68,7 +62,7 @@ static int do_link(cc3_t *ctx, char *out_path)
 
     // Run linker
     if (err == 0) {
-        char *args[] = { "cc", "-no-pie", "-o", out_path, obj_path, NULL };
+        char *args[] = { "cc", "-o", out_path, obj_path, NULL };
         err = run_process(args);
     }
 

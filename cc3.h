@@ -583,28 +583,38 @@ stmt_t *make_stmt(int kind);
 
 /** Code generation **/
 
+typedef struct goto_label goto_label_t;
+
+struct goto_label {
+    goto_label_t *next;
+    char *name;
+    int label;
+};
+
 typedef struct gen gen_t;
 
 struct gen {
-    /** Function state **/
-
-    // Size of the current frame
-    int frame_size;
-    // Initial gp_offset
-    int gp_offset;
-    // Number of local labels
-    int label_cnt;
-    // Number of active temporaries
-    int temp_cnt;
-
     /** Global state **/
 
-    // Number of string literals
-    int str_lit_cnt;
+    // Next unique label #
+    int label_cnt;
+
     // Output code and data
     string_t code;
     string_t data;
     string_t lits;
+
+    /** Function state **/
+
+    // Size of the current frame
+    int frame_size;
+    // Initial values for va_lists
+    int gp_offset;
+    int fp_offset;
+    // Number of active temporaries
+    int temp_cnt;
+    // Jump targets for gotos
+    goto_label_t *goto_labels;
 };
 
 void gen_init(gen_t *self);

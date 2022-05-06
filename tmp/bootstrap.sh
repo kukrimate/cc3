@@ -4,29 +4,36 @@ set -e
 
 files="cc3 gen sema parse lex util"
 
-# Build first stage
+##
+# Stage 0: Build cc3 using cc3 built with the system compiler
+##
+
 for file in $files
 do
     echo "Preprocessing $file"
     cpp -U__GNUC__ -P $file.c > tmp/$file.i
-    echo "Compiling $file (stage 1)"
+    echo "Compiling $file (stage 0)"
     ./cc3 -c -o tmp/$file.o tmp/$file.i > /dev/null
 done
 
-# Link first stage
-echo "Linking (stage 1)"
-cc -no-pie -o tmp/cc3 tmp/*.o
+echo "Linking (stage 0)"
+cc -o tmp/cc3 tmp/*.o
 
-# Build second stage
-for file in $files
+##
+# Stage N: Build cc3 using cc3 built with itself
+##
+
+for N in $(seq 2)
 do
-    echo "Compiling $file (stage 2)"
-    ./tmp/cc3 -c -o tmp/$file.o tmp/$file.i > /dev/null
-done
+    for file in $files
+    do
+        echo "Compiling $file (stage $N)"
+        ./tmp/cc3 -c -o tmp/$file.o tmp/$file.i > /dev/null
+    done
 
-# Link first stage
-echo "Linking (stage 2)"
-cc -no-pie -o tmp/cc3 tmp/*.o
+    echo "Linking (stage $N)"
+    cc -o tmp/cc3 tmp/*.o
+done
 
 # Cleanup
 rm tmp/*.i tmp/*.o
