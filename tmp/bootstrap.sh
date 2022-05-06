@@ -1,36 +1,32 @@
-#!/bin/bash
+#!/bin/sh
 
 set -e
 
-build_file() {
-    gcc -D__GNUC__=0 -E -P $1.c > tmp/$1.c3
-    ./cc3 tmp/$1.c3 -c -o tmp/$1.o3
-}
+files="cc3 gen sema parse lex util"
 
-build_file cc3
-build_file gen
-build_file sema
-build_file parse
-build_file lex
-build_file util
-cc -no-pie tmp/cc3.o3 tmp/gen.o3 tmp/sema.o3 tmp/parse.o3 tmp/lex.o3 \
-    tmp/util.o3 -o tmp/cc3_self
-
-build_file2() {
-    gcc -D__GNUC__=0 -E -P $1.c > tmp/$1.c3
-    ./tmp/cc3_self tmp/$1.c3 -c -o tmp/$1.o3
-}
-
-for i in $(seq 2)
+# Build first stage
+for file in $files
 do
-    build_file2 cc3
-    build_file2 gen
-    build_file2 sema
-    build_file2 parse
-    build_file2 lex
-    build_file2 util
-    cc -no-pie tmp/cc3.o3 tmp/gen.o3 tmp/sema.o3 tmp/parse.o3 tmp/lex.o3 \
-        tmp/util.o3 -o tmp/cc3_self
+    echo "Preprocessing $file"
+    cpp -U__GNUC__ -P $file.c > tmp/$file.i
+    echo "Compiling $file (stage 1)"
+    ./cc3 -c -o tmp/$file.o tmp/$file.i > /dev/null
 done
 
-rm tmp/*.{c3,o3}
+# Link first stage
+echo "Linking (stage 1)"
+cc -no-pie -o tmp/cc3 tmp/*.o
+
+# Build second stage
+for file in $files
+do
+    echo "Compiling $file (stage 2)"
+    ./tmp/cc3 -c -o tmp/$file.o tmp/$file.i > /dev/null
+done
+
+# Link first stage
+echo "Linking (stage 2)"
+cc -no-pie -o tmp/cc3 tmp/*.o
+
+# Cleanup
+rm tmp/*.i tmp/*.o
