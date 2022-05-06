@@ -761,7 +761,7 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
                 if ((ty = sema_findtypedef(&self->sema, tk_str(tk))))
                     break;
 
-            // FALLTHROUGH
+            FALLTHROUGH;
 
         default:
             // Struct, union, enum, or typedef

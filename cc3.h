@@ -33,7 +33,14 @@ __attribute__((noreturn)) void err(const char *fmt, ...);
 #ifdef NDEBUG
 #define debugln(fmt, ...)
 #else
-#define debugln(fmt, ...) println(fmt __VA_OPT__(,) __VA_ARGS__)
+#define debugln(fmt, ...) println(fmt, ## __VA_ARGS__)
+#endif
+
+/** Switch fallthrough marker **/
+#ifdef __GNUC__
+#define FALLTHROUGH __attribute__((fallthrough))
+#else
+#define FALLTHROUGH
 #endif
 
 /** Resizable string abstraction **/

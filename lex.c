@@ -273,7 +273,7 @@ retry:
                 return (tk->type = TK_CONSTANT);
             case '\\':
                 ch = unescape(self, tk);
-                // FALLTHROUGH
+                FALLTHROUGH;
             default:
                 tk->val = (tk->val << 8) | ch;
             }
@@ -289,7 +289,7 @@ retry:
                 return (tk->type = TK_STR_LIT);
             case '\\':
                 ch = unescape(self, tk);
-                // FALLTHROUGH
+                FALLTHROUGH;
             default:
                 string_push(&tk->str, ch);
             }

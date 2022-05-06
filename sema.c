@@ -383,7 +383,7 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
                 sym->kind = SYM_STATIC;
                 break;
             }
-            // FALLTHROUGH
+            FALLTHROUGH;
         default:
             err("Invalid re-declaration of %s", name);
         }

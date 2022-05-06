@@ -48,10 +48,10 @@ void gen_free(gen_t *self)
 }
 
 #define emit_data(self, fmt, ...)   \
-    string_printf(&self->data, fmt __VA_OPT__(,) __VA_ARGS__)
+    string_printf(&self->data, fmt, ## __VA_ARGS__)
 
 #define emit_code(self, fmt, ...)   \
-    string_printf(&self->code, fmt __VA_OPT__(,) __VA_ARGS__)
+    string_printf(&self->code, fmt, ## __VA_ARGS__)
 
 static int emit_str_lit(gen_t *self, const char *s)
 {
