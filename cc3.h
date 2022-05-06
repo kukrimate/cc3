@@ -589,11 +589,13 @@ struct gen {
     /** Function state **/
 
     // Size of the current frame
-    int offset;
+    int frame_size;
     // Initial gp_offset
     int gp_offset;
-    // State of the current function
+    // Number of local labels
     int label_cnt;
+    // Number of active temporaries
+    int temp_cnt;
 
     /** Global state **/
 

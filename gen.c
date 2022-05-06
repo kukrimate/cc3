@@ -161,7 +161,7 @@ void gen_static(gen_t *self, sym_t *sym, init_t *init)
 {
     emit_data(self,
         "align %d\n"
-        "%s:\n",
+        "$%s:\n",
         ty_align(sym->ty),
         sym->asm_name);
     gen_static_initializer(self, sym->ty, init);
@@ -194,6 +194,19 @@ static void emit_jump(gen_t *self, const char *op, int label)
     emit_code(self, "%s .L%d\n", op, label);
 }
 
+static void emit_push(gen_t *self, const char *reg)
+{
+    ++self->temp_cnt;
+    emit_code(self, "push %s\n", reg);
+}
+
+static void emit_pop(gen_t *self, const char *reg)
+{
+    assert(self->temp_cnt);
+    --self->temp_cnt;
+    emit_code(self, "pop %s\n", reg);
+}
+
 static void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label);
@@ -208,7 +221,7 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
             if (sym->kind == SYM_LOCAL)
                 emit_code(self, "lea rax, [rbp - %d]\n",
-                            self->offset - sym->offset);
+                            self->frame_size - sym->offset);
             else
                 emit_code(self, "mov rax, $%s\n", sym->asm_name);
         }
@@ -326,20 +339,38 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         int cnt = 0;
         for (expr_t *arg = expr->as_binary.rhs; arg; arg = arg->next) {
             gen_value(self, jmp_ctx, arg);
-            emit_code(self, "push rax\n");
+            emit_push(self, "rax");
             ++cnt;
         }
         // Move them to registers
         assert(cnt < 6);
         while (cnt)
-            emit_code(self, "pop %s\n", qwarg[--cnt]);
+            emit_pop(self, qwarg[--cnt]);
 
-        // Generate call target
-        gen_value(self, jmp_ctx, expr->as_binary.lhs);
-        emit_code(self, "mov r10, rax\n");
+        // Align frame if necessary
+        if (self->temp_cnt & 1)
+            emit_code(self, "sub rsp, 8\n");
 
-        // Do the call (zero rax for varargs)
-        emit_code(self, "xor eax, eax\ncall r10\n");
+        // Generate call (zero rax for varargs FPU args)
+        expr_t *fn = expr->as_binary.lhs;
+        if (fn->kind == EXPR_SYM) {
+            // Direct call
+            emit_code(self,
+                "xor eax, eax\n"
+                "call $%s\n",
+                fn->as_sym->asm_name);
+        } else {
+            // Indirect call
+            gen_value(self, jmp_ctx, fn);
+            emit_code(self,
+                "mov r10, rax\n"
+                "xor eax, eax\n"
+                "call r10\n");
+        }
+
+        // Remove padding if we've added some
+        if (self->temp_cnt & 1)
+            emit_code(self, "add rsp, 8\n");
 
         // Extend smaller then wordsize return value
         switch (expr->ty->kind) {
@@ -385,13 +416,11 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     case EXPR_XOR:
     case EXPR_OR:
         gen_value(self, jmp_ctx, expr->as_binary.lhs);
-        emit_code(self, "push rax\n");
+        emit_push(self, "rax");
         gen_value(self, jmp_ctx, expr->as_binary.rhs);
-        emit_code(self,
-            "mov rcx, rax\n"
-            "pop rax\n"
-            "%s\n",
-            bop(expr->kind));
+        emit_code(self, "mov rcx, rax\n");
+        emit_pop(self, "rax");
+        emit_code(self, "%s\n", bop(expr->kind));
         break;
 
     case EXPR_LT:
@@ -419,11 +448,10 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     case EXPR_AS:
     {
         gen_value(self, jmp_ctx, expr->as_binary.rhs);
-        emit_code(self, "push rax\n");
+        emit_push(self, "rax");
         gen_addr(self, jmp_ctx, expr->as_binary.lhs);
-        emit_code(self,
-            "mov rcx, rax\n"
-            "pop rax\n");
+        emit_code(self, "mov rcx, rax\n");
+        emit_pop(self, "rax");
         // NOTE: do proper type conversions instead of this hackery
         // of deciding the width based on the destination type. But for
         // now this should fix NULL being truncated to 32-bits
@@ -503,7 +531,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         emit_code(self,
             "lea rcx, [rbp - %d]\n"
             "mov qword [rax + 16], rcx\n",
-            self->offset);                  // reg_save_area
+            self->frame_size);              // reg_save_area
         break;
 
     case EXPR_VA_END:   // No-op on AMD64
@@ -540,12 +568,11 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
     case EXPR_NE:
         // Generate comparison
         gen_value(self,jmp_ctx, expr->as_binary.lhs);
-        emit_code(self, "push rax\n");
+        emit_push(self, "rax");
         gen_value(self, jmp_ctx, expr->as_binary.rhs);
-        emit_code(self,
-            "mov rcx, rax\n"
-            "pop rax\n"
-            "cmp rax, rcx\n");
+        emit_code(self, "mov rcx, rax\n");
+        emit_pop(self, "rax");
+        emit_code(self, "cmp rax, rcx\n");
         // Generate jump
         emit_jump(self, jcc(expr->kind, val), label);
         break;
@@ -591,22 +618,22 @@ static void gen_write(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offset, exp
     case TY_SCHAR:
     case TY_UCHAR:
     case TY_BOOL:
-        emit_code(self, "mov byte [rbp - %d], al\n", self->offset - offset);
+        emit_code(self, "mov byte [rbp - %d], al\n", self->frame_size - offset);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "mov word [rbp - %d], ax\n", self->offset - offset);
+        emit_code(self, "mov word [rbp - %d], ax\n", self->frame_size - offset);
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "mov dword [rbp - %d], eax\n", self->offset - offset);
+        emit_code(self, "mov dword [rbp - %d], eax\n", self->frame_size - offset);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "mov qword [rbp - %d], rax\n", self->offset - offset);
+        emit_code(self, "mov qword [rbp - %d], rax\n", self->frame_size - offset);
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -636,7 +663,7 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
             char *data = init->as_expr->as_str_lit.data;
             for (int i = 0; i < ty->array.cnt; ++i, ++offset)
                 emit_code(self, "mov byte [rbp - %d], %02Xh\n",
-                    self->offset - offset, data[i]);
+                    self->frame_size - offset, data[i]);
         } else {                                        // Initializer list
             init = init->as_list;
             for (int i = 0; i < ty->array.cnt; ++i) {
@@ -853,22 +880,22 @@ static void gen_param_spill(gen_t *self, ty_t *ty, int offset, int i)
     case TY_SCHAR:
     case TY_UCHAR:
     case TY_BOOL:
-        emit_code(self, "mov byte [rbp - %d], %s\n", self->offset - offset, barg[i]);
+        emit_code(self, "mov byte [rbp - %d], %s\n", self->frame_size - offset, barg[i]);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "mov word [rbp - %d], %s\n", self->offset - offset, warg[i]);
+        emit_code(self, "mov word [rbp - %d], %s\n", self->frame_size - offset, warg[i]);
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "mov dword [rbp - %d], %s\n", self->offset - offset, dwarg[i]);
+        emit_code(self, "mov dword [rbp - %d], %s\n", self->frame_size - offset, dwarg[i]);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "mov qword [rbp - %d], %s\n", self->offset - offset, qwarg[i]);
+        emit_code(self, "mov qword [rbp - %d], %s\n", self->frame_size - offset, qwarg[i]);
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -884,7 +911,17 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
         "mov rbp, rsp\n"
         "sub rsp, %d\n",
         sym->asm_name,
-        self->offset = align(offset, 16));
+        self->frame_size = align(offset, 16));
+
+#ifdef RUNTIME_ASSERTIONS
+    // Frame alignment check
+    emit_code(self,
+        "mov rax, rsp\n"
+        "and rax, 0Fh\n"
+        "jz .align_ok\n"
+        "int3\n"
+        ".align_ok:\n");
+#endif
 
     // Generate varargs register save prologue
     // NOTE: this ignores FPU registers for now
@@ -903,6 +940,7 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
 
     // Setup function specific values
     self->label_cnt = 0;
+    self->temp_cnt = 0;
 
     // Generate body
     jmp_ctx_t func_ctx = { next_label(self), -1, -1, NULL, -1 };
