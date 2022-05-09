@@ -709,9 +709,9 @@ expr_t *make_unary(int kind, expr_t *arg)
     }
 }
 
-static expr_t *make_ptradd(ty_t *base_ty, expr_t *ptr, expr_t *idx)
+static expr_t *make_ptraddsub(int kind, ty_t *base_ty, expr_t *ptr, expr_t *idx)
 {
-    expr_t *expr = make_expr(EXPR_ADD);
+    expr_t *expr = make_expr(kind);
     expr->ty = make_pointer(base_ty);
     expr->as_binary.lhs = ptr;
     expr->as_binary.rhs = make_binary(EXPR_MUL, idx,
@@ -719,7 +719,7 @@ static expr_t *make_ptradd(ty_t *base_ty, expr_t *ptr, expr_t *idx)
     return expr;
 }
 
-static expr_t *make_ptrsub(ty_t *base_ty, expr_t *ptr1, expr_t *ptr2)
+static expr_t *make_ptrdiff(ty_t *base_ty, expr_t *ptr1, expr_t *ptr2)
 {
     expr_t *expr = make_expr(EXPR_SUB);
     expr->ty = make_ty(TY_LONG);
@@ -789,9 +789,9 @@ expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
     {
         ty_t *base_ty;
         if ((base_ty = find_ptr_base(lhs->ty)))
-            return make_ptradd(base_ty, lhs, rhs);
+            return make_ptraddsub(EXPR_ADD, base_ty, lhs, rhs);
         if ((base_ty = find_ptr_base(rhs->ty)))
-            return make_ptradd(base_ty, lhs, rhs);
+            return make_ptraddsub(EXPR_ADD, base_ty, lhs, rhs);
         goto make_arith;
     }
 
@@ -799,7 +799,9 @@ expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
     {
         ty_t *base_ty1, *base_ty2;
         if ((base_ty1 = find_ptr_base(lhs->ty)) && (base_ty2 = find_ptr_base(rhs->ty)))
-            return make_ptrsub(base_ty1, lhs, rhs);
+            return make_ptrdiff(base_ty1, lhs, rhs);
+        if (base_ty1)
+            return make_ptraddsub(EXPR_SUB, base_ty1, lhs, rhs);
         goto make_arith;
     }
 
