@@ -237,8 +237,8 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             sym_t *sym = expr->as_sym;
 
             if (sym->kind == SYM_LOCAL)
-                emit_code(self, "\tleaq\t-%d(%%rbp), %%rax\n",
-                            self->frame_size - sym->offset);
+                emit_code(self, "\tleaq\t%d(%%rbp), %%rax\n",
+                            -(self->frame_size - sym->offset));
             else
                 emit_code(self, "\tleaq\t%s(%%rip), %%rax\n", sym->asm_name);
         }
@@ -256,19 +256,43 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         gen_value(self, jmp_ctx, expr->as_unary.arg);
         break;
     case EXPR_VA_ARG:
-        // First we need the address of our va_list
         gen_value(self, jmp_ctx, expr->as_unary.arg);
-        // FIXME: this only works with arguments passed in registers
-        // We need to calculate the sum of gp_offset, reg_save_area
-        // Then finally skip over the register we've consumed
+
         emit_code(self,
-            "\tmovq\t%%rax, %%rcx\n"       // rcx = &va_list
-            "\tmovl\t(%%rcx), %%eax\n"     // eax = va_list->gp_offset
-            "\taddq\t16(%%rcx), %%rax\n"   // rax += va_list->reg_save_area
-            "\taddl\t$8, (%%rcx)\n");       // va_list->gp_offstet += 8
+            "\tmovq\t%%rax, %%rcx\n"        // rcx = &va_list
+            "\tmovl\t(%%rcx), %%eax\n");    // eax = va_list->gp_offset
+        // Check if we need to look at overflow arg area
+        int loflo = next_label(self), lend = next_label(self);
+        emit_code(self,
+            "\tcmpl\t$48, %%eax\n"          // if eax == 48 then goto oflo;
+            "\tje\t.L%d\n", loflo);
+        // Pull argument from register save area
+        emit_code(self,
+            "\taddq\t16(%%rcx), %%rax\n"    // rax += va_list->reg_save_area
+            "\taddl\t$8, (%%rcx)\n"         // va_list->gp_offset += 8
+            "\tjmp\t.L%d\n", lend);         // goto end;
+        // Pull argument from stack
+        emit_code(self,
+            ".L%d:\n"
+            "\tmovq\t8(%%rcx), %%rax\n"     // rax = va_list->overflow_arg_area
+            "\taddq\t$%d, 8(%%rcx)\n"       // va_list->overflow_arg_area += ty_size
+            ".L%d:\n",
+            loflo,
+            align(ty_size(expr->ty), 8),
+            lend);
+
         break;
     default:
         err("Expected lvalue expression");
+    }
+}
+
+static void gen_oflo_args(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *args)
+{
+    if (args) {
+        gen_oflo_args(self, jmp_ctx, args->next);
+        gen_value(self, jmp_ctx, args);
+        emit_push(self, "%rax");
     }
 }
 
@@ -335,25 +359,31 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
     case EXPR_CALL:
     {
-        // Generate arguments
-        int cnt = 0;
-        for (expr_t *arg = expr->as_binary.rhs; arg; arg = arg->next) {
-            gen_value(self, jmp_ctx, arg);
+        // First we deal with the stack arguments
+        int reg_cnt = 0;
+        expr_t *args = expr->as_binary.rhs;
+        for (; reg_cnt < 6 && args; ++reg_cnt, args = args->next) {
+            gen_value(self, jmp_ctx, args);
             emit_push(self, "%rax");
-            ++cnt;
         }
-        // Move them to registers
-        assert(cnt < 6);
-        while (cnt)
-            emit_pop(self, qwarg[--cnt]);
+        while (reg_cnt--)
+            emit_pop(self, qwarg[reg_cnt]);
 
-        // Align frame if necessary
-        if (self->temp_cnt & 1)
-            emit_code(self, "\tsubq\t$8, %%rsp\n");
+        // Then we must count the stack arguments to maintain alignment
+        int pad_cnt = 0;
+        for (expr_t *tmp = args; tmp; tmp = tmp->next)
+            ++pad_cnt;
+        // We push an extra eightbyte if we would end up with an unaligned stack
+        if ((self->temp_cnt + pad_cnt) & 1) {
+            emit_push(self, "%rax");
+            ++pad_cnt;
+        }
+        // Finally we can push the leftover arguments in reverse order
+        gen_oflo_args(self, jmp_ctx, args);
 
         // Generate call (zero rax for varargs FPU args)
         expr_t *fn = expr->as_binary.lhs;
-        if (fn->kind == EXPR_SYM) {
+        if (fn->kind == EXPR_SYM && fn->ty->kind == TY_FUNCTION) {
             // Direct call
             emit_code(self,
                 "\txorl\t%%eax, %%eax\n"
@@ -368,9 +398,11 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
                 "\tcall\t*%%r10\n");
         }
 
-        // Remove padding if we've added some
-        if (self->temp_cnt & 1)
-            emit_code(self, "\taddq\t$8, %%rsp\n");
+        // After the call we can remove all the padding
+        if (pad_cnt) {
+            emit_code(self, "\taddq\t$%d, %%rsp\n", pad_cnt * 8);
+            self->temp_cnt -= pad_cnt;
+        }
 
         // Extend smaller then wordsize return value
         switch (expr->ty->kind) {
@@ -538,16 +570,18 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         // Write gp_offset and fp_offset
         emit_code(self,
             "\tmovl\t$%d, (%%rax)\n"
-            "\tmovl\t$0, 4(%%rax)\n",
-            self->gp_offset);
+            "\tmovl\t$%d, 4(%%rax)\n",
+            self->gp_offset,
+            self->fp_offset);
         // Fill the pointers
         emit_code(self,
-            "\tleaq\t16(%%rbp), %%rcx\n"
-            "\tmovq\t%%rcx, 8(%%rax)\n");       // overflow_arg_area
+            "\tleaq\t%d(%%rbp), %%rcx\n"
+            "\tmovq\t%%rcx, 8(%%rax)\n",        // overflow_arg_area
+            -(self->frame_size - self->oflo));
         emit_code(self,
-            "\tleaq\t-%d(%%rbp), %%rcx\n"
+            "\tleaq\t%d(%%rbp), %%rcx\n"
             "\tmovq\t%%rcx, 16(%%rax)\n",
-            self->frame_size);                  // reg_save_area
+            -self->frame_size);                 // reg_save_area
         break;
 
     case EXPR_VA_END:                           // No-op on AMD64
@@ -630,26 +664,26 @@ static void gen_write(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offset, exp
 {
     gen_value(self, jmp_ctx, expr);
     switch (ty->kind) {
+    case TY_BOOL:
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
-    case TY_BOOL:
-        emit_code(self, "\tmovb\t%%al, -%d(%%rbp)\n", self->frame_size - offset);
+        emit_code(self, "\tmovb\t%%al, %d(%%rbp)\n", -(self->frame_size - offset));
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "\tmovw\t%%ax, -%d(%%rbp)\n", self->frame_size - offset);
+        emit_code(self, "\tmovw\t%%ax, %d(%%rbp)\n", -(self->frame_size - offset));
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "\tmovl\t%%eax, -%d(%%rbp)\n", self->frame_size - offset);
+        emit_code(self, "\tmovl\t%%eax, %d(%%rbp)\n", -(self->frame_size - offset));
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "\tmovq\t%%rax, -%d(%%rbp)\n", self->frame_size - offset);
+        emit_code(self, "\tmovq\t%%rax, %d(%%rbp)\n", -(self->frame_size - offset));
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -678,8 +712,8 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
         if (init->kind == INIT_EXPR) {                  // String literal
             char *data = init->as_expr->as_str_lit.data;
             for (int i = 0; i < ty->array.cnt; ++i, ++offset)
-                emit_code(self, "\tmovb\t$0x%02x, -%d(%%rbp)\n",
-                    data[i], self->frame_size - offset);
+                emit_code(self, "\tmovb\t$0x%02x, %d(%%rbp)\n",
+                    data[i], -(self->frame_size - offset));
         } else {                                        // Initializer list
             init = init->as_list;
             for (int i = 0; i < ty->array.cnt; ++i) {
@@ -892,26 +926,26 @@ static void gen_param_spill(gen_t *self, ty_t *ty, int offset, int i)
     assert(i < 6);
 
     switch (ty->kind) {
+    case TY_BOOL:
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
-    case TY_BOOL:
-        emit_code(self, "\tmovb\t%s, -%d(%%rbp)\n", barg[i], self->frame_size - offset);
+        emit_code(self, "\tmovb\t%s, %d(%%rsp)\n", barg[i], offset);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit_code(self, "\tmovw\t%s, -%d(%%rbp)\n", warg[i], self->frame_size - offset);
+        emit_code(self, "\tmovw\t%s, %d(%%rsp)\n", warg[i], offset);
         break;
     case TY_INT:
     case TY_UINT:
-        emit_code(self, "\tmovl\t%s, -%d(%%rbp)\n", dwarg[i], self->frame_size - offset);
+        emit_code(self, "\tmovl\t%s, %d(%%rsp)\n", dwarg[i], offset);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit_code(self, "\tmovq\t%s, -%d(%%rbp)\n", qwarg[i], self->frame_size - offset);
+        emit_code(self, "\tmovq\t%s, %d(%%rsp)\n", qwarg[i], offset);
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -933,29 +967,38 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
         self->frame_size = align(offset, 16));
 
 #ifdef RUNTIME_ASSERTIONS
+    int lframe_ok = next_label(self);
     // Frame alignment check
     emit_code(self,
         "\tmovq\t%%rsp, %%rax\n"
         "\tandq\t$0xf, %%rax\n"
-        "\tjz\t.align_ok\n"
+        "\tjz\t.L%d\n"
         "\tint3\n"
-        ".align_ok:\n");
+        ".L%d:\n", lframe_ok, lframe_ok);
 #endif
 
-    // Generate varargs register save prologue
-    // NOTE: this ignores FPU registers for now
-    if (sym->ty->function.var)
-        for (int i = 0, offset = 0; i < 6; ++i, offset += 8)
-            gen_param_spill(self, make_ty(TY_LONG), offset, i);
-
     // Generate parameter spill code
-    param_t *param = sym->ty->function.params;
-    int param_i = 0;
-    for (; param; param = param->next)
-        gen_param_spill(self, param->sym->ty, param->sym->offset, param_i++);
+    int gp = 0, oflo = self->frame_size + 16;
 
-    // Starting gp_offset is after the last named parameter
-    self->gp_offset = param_i * 8;
+    for (param_t *param = sym->ty->function.params; param; param = param->next)
+        if (gp < 6) {
+            gen_param_spill(self, param->sym->ty, param->sym->offset, gp++);
+        } else {
+            int palign = ty_align(param->ty);
+            oflo = align(oflo, palign < 8 ? 8 : palign);
+            param->sym->offset = oflo;
+            oflo += ty_size(param->ty);
+        }
+
+    // Starting values for va_lists
+    self->gp_offset = gp * 8;
+    self->fp_offset = 48;
+    self->oflo = align(oflo, 8);
+
+    // Spill the rest of the registers for varargs
+    if (sym->ty->function.var)
+        for (; gp < 6; ++gp)
+            emit_code(self, "\tmovq\t%s, %d(%%rsp)\n", qwarg[gp], gp * 8);
 
     // Fill in function state
     self->temp_cnt = 0;

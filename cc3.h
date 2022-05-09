@@ -611,6 +611,7 @@ struct gen {
     // Initial values for va_lists
     int gp_offset;
     int fp_offset;
+    int oflo;
     // Number of active temporaries
     int temp_cnt;
     // Jump targets for gotos

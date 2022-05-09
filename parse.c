@@ -1301,12 +1301,18 @@ static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
 
     // Now we can allocate space in the stack frame for the
     // parameters of the current function
+    int gp = 0;
+
     for (param_t *param = ty->function.params; param; param = param->next) {
         if (!param->sym)
             err("Unnamed parameters are not allowed in function definitions");
-        self->sema.offset = align(self->sema.offset, ty_align(param->ty));
-        param->sym->offset = self->sema.offset;
-        self->sema.offset += ty_size(param->ty);
+
+        if (gp < 6) {
+            ++gp;
+            self->sema.offset = align(self->sema.offset, ty_align(param->ty));
+            param->sym->offset = self->sema.offset;
+            self->sema.offset += ty_size(param->ty);
+        }
     }
 
     // Bring parameters into scope for parsing the function body

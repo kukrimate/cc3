@@ -10,7 +10,6 @@ was compiling itself, as a result there are many TODOs:
 - Type checking other then where strictly necessary for semantics
 - Passing structure and union parameters by value
 - Returning structures and unions by value
-- Stack arguments, functions are limited to 6 parameters
 - Designated initializers
 - Compound literals
 - Tentative definitions of statics/externs
