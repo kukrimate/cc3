@@ -526,7 +526,7 @@ ty_t *sema_define_tag(sema_t *self, int kind, const char *name)
     }
 }
 
-static expr_t *make_expr(int kind)
+static expr_t *alloc_expr(int kind)
 {
     expr_t *expr = calloc(1, sizeof *expr);
     if (!expr) abort();
@@ -534,11 +534,11 @@ static expr_t *make_expr(int kind)
     return expr;
 }
 
-expr_t *make_sym(sema_t *self, const char *name)
+expr_t *make_sym_expr(sema_t *self, const char *name)
 {
     // Special pre-declared identifier
     if (self->func_name && !strcmp(name, "__func__"))
-        return make_str_lit(self->func_name);
+        return make_str_expr(strdup(self->func_name));
 
     // Find symbol
     sym_t *sym = sema_lookup(self, name);
@@ -554,31 +554,31 @@ expr_t *make_sym(sema_t *self, const char *name)
     case SYM_EXTERN:
     case SYM_STATIC:
     case SYM_LOCAL:
-        expr = make_expr(EXPR_SYM);
+        expr = alloc_expr(EXPR_SYM);
         expr->ty = sym->ty;
         expr->as_sym = sym;
         break;
     case SYM_ENUM_CONST:
-        expr = make_const(make_ty(TY_INT), sym->val);
+        expr = make_const_expr(make_ty(TY_INT), sym->val);
         break;
     }
 
     return expr;
 }
 
-expr_t *make_const(ty_t *ty, val_t value)
+expr_t *make_const_expr(ty_t *ty, val_t value)
 {
-    expr_t *expr = make_expr(EXPR_CONST);
+    expr_t *expr = alloc_expr(EXPR_CONST);
     expr->ty = ty;
     expr->as_const.value = value;
     return expr;
 }
 
-expr_t *make_str_lit(const char *data)
+expr_t *make_str_expr(char *data)
 {
-    expr_t *expr = make_expr(EXPR_STR_LIT);
+    expr_t *expr = alloc_expr(EXPR_STR);
     expr->ty = make_array(make_ty(TY_CHAR), strlen(data) + 1);
-    expr->as_str_lit.data = strdup(data);
+    expr->as_str.data = data;
     return expr;
 }
 
@@ -604,7 +604,7 @@ static int find_memb(ty_t *ty, const char *name, ty_t **out)
 
 expr_t *make_memb_expr(expr_t *aggr, const char *name)
 {
-    expr_t *expr = make_expr(EXPR_MEMB);
+    expr_t *expr = alloc_expr(EXPR_MEMB);
     expr->as_memb.aggr = aggr;
     expr->as_memb.offset = find_memb(aggr->ty, name, &expr->ty);
     if (expr->as_memb.offset == -1)
@@ -619,7 +619,7 @@ expr_t *make_cast_expr(ty_t *ty, expr_t *arg)
         return arg;
     }
 
-    expr_t *expr = make_expr(EXPR_CAST);
+    expr_t *expr = alloc_expr(EXPR_CAST);
     expr->ty = ty;
     expr->as_unary.arg = arg;
     return expr;
@@ -667,14 +667,14 @@ expr_t *make_unary(int kind, expr_t *arg)
     switch (kind) {
     case EXPR_REF:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = make_pointer(arg->ty);
         expr->as_unary.arg = arg;
         return expr;
     }
     case EXPR_DREF:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         if (!(expr->ty = find_ptr_base(arg->ty)))
             err("Pointer type required");
         expr->as_unary.arg = arg;
@@ -683,14 +683,14 @@ expr_t *make_unary(int kind, expr_t *arg)
     case EXPR_NEG:
     case EXPR_NOT:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = arg->ty;
         expr->as_unary.arg = arg;
         return expr;
     }
     case EXPR_LNOT:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = make_ty(TY_INT);
         expr->as_unary.arg = arg;
         return expr;
@@ -699,7 +699,7 @@ expr_t *make_unary(int kind, expr_t *arg)
     case EXPR_VA_END:
     case EXPR_VA_ARG:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = make_ty(TY_VOID);
         expr->as_unary.arg = arg;
         return expr;
@@ -711,22 +711,22 @@ expr_t *make_unary(int kind, expr_t *arg)
 
 static expr_t *make_ptraddsub(int kind, ty_t *base_ty, expr_t *ptr, expr_t *idx)
 {
-    expr_t *expr = make_expr(kind);
+    expr_t *expr = alloc_expr(kind);
     expr->ty = make_pointer(base_ty);
     expr->as_binary.lhs = ptr;
     expr->as_binary.rhs = make_binary(EXPR_MUL, idx,
-        make_const(make_ty(TY_ULONG), ty_size(base_ty)));
+        make_const_expr(make_ty(TY_ULONG), ty_size(base_ty)));
     return expr;
 }
 
 static expr_t *make_ptrdiff(ty_t *base_ty, expr_t *ptr1, expr_t *ptr2)
 {
-    expr_t *expr = make_expr(EXPR_SUB);
+    expr_t *expr = alloc_expr(EXPR_SUB);
     expr->ty = make_ty(TY_LONG);
     expr->as_binary.lhs = ptr1;
     expr->as_binary.rhs = ptr2;
     return make_binary(EXPR_DIV, expr,
-        make_const(make_ty(TY_INT), ty_size(base_ty)));
+        make_const_expr(make_ty(TY_INT), ty_size(base_ty)));
 }
 
 expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
@@ -778,7 +778,7 @@ expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
         if (!func_ty || func_ty->kind != TY_FUNCTION)
             err("Non-function object called");
 
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = func_ty->function.ret_ty;
         expr->as_binary.lhs = lhs;
         expr->as_binary.rhs = rhs;
@@ -815,7 +815,7 @@ expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
     case EXPR_OR:
     make_arith:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = lhs->ty;
         expr->as_binary.lhs = lhs;
         expr->as_binary.rhs = rhs;
@@ -831,7 +831,7 @@ expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
     case EXPR_LAND:
     case EXPR_LOR:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = make_ty(TY_INT);
         expr->as_binary.lhs = lhs;
         expr->as_binary.rhs = rhs;
@@ -841,7 +841,7 @@ expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
     case EXPR_AS:
     case EXPR_SEQ:
     {
-        expr_t *expr = make_expr(kind);
+        expr_t *expr = alloc_expr(kind);
         expr->ty = rhs->ty;
         expr->as_binary.lhs = lhs;
         expr->as_binary.rhs = rhs;
@@ -855,7 +855,7 @@ expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs)
 
 expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
 {
-    expr_t *expr = make_expr(kind);
+    expr_t *expr = alloc_expr(kind);
     assert(kind == EXPR_COND);
     expr->ty = arg2->ty;
 
@@ -870,7 +870,7 @@ expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3)
 
 expr_t *make_stmt_expr(stmt_t *body)
 {
-    expr_t *expr = make_expr(EXPR_STMT);
+    expr_t *expr = alloc_expr(EXPR_STMT);
 
     // Get the type of the last eval (or void)
     stmt_t *last = body;
@@ -917,7 +917,7 @@ static init_t *bind_scalar(init_t **iter)
     // If we reach a member of an aggregate without an initializer, we need to
     // zero initialize it. We make that explicit to simplify code generation.
     if (!*iter)
-        return make_init_expr(make_const(make_ty(TY_INT), 0));
+        return make_init_expr(make_const_expr(make_ty(TY_INT), 0));
 
     // Otherwise we consume the first initializer from the iterator.
     init_t *init = *iter;
@@ -984,12 +984,12 @@ static init_t *bind_array_str(ty_t *ty, init_t **iter)
     }
 
     // Bail if it's not a string literal
-    if (init->as_expr->kind != EXPR_STR_LIT)
+    if (init->as_expr->kind != EXPR_STR)
         goto bail;
 
     // The string literal might complete the array's type
     if (ty->array.cnt == -1)
-        ty->array.cnt = strlen(init->as_expr->as_str_lit.data) + 1;
+        ty->array.cnt = strlen(init->as_expr->as_str.data) + 1;
 
     return make_init_expr(init->as_expr);
 

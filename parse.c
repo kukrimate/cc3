@@ -116,6 +116,7 @@ static expr_t *assignment_expression(cc3_t *self);
 static expr_t *expression(cc3_t *self);
 static int constant_expression(cc3_t *self);
 
+static bool is_type_name(cc3_t *self, tk_t *tk);
 static stmt_t *read_block(cc3_t *self);
 static ty_t *type_name(cc3_t *self);
 
@@ -152,10 +153,10 @@ expr_t *primary_expression(cc3_t *self)
             break;
         }
 
-        expr = make_sym(&self->sema, tk_str(tk));
+        expr = make_sym_expr(&self->sema, tk_str(tk));
         break;
     case TK_CONSTANT:
-        expr = make_const(make_ty(TY_INT), tk->val);
+        expr = make_const_expr(make_ty(TY_INT), tk->val);
         break;
     case TK_STR_LIT:
         {
@@ -165,8 +166,7 @@ expr_t *primary_expression(cc3_t *self)
             string_printf(&s, "%s", tk->str.data);
             while ((tk = maybe_want(self, TK_STR_LIT)))
                 string_printf(&s, "%s", tk->str.data);
-            expr = make_str_lit(s.data);
-            string_free(&s);
+            expr = make_str_expr(s.data);
             break;
         }
     case TK_LPAREN:
@@ -224,14 +224,14 @@ expr_t *postfix_expression(cc3_t *self)
         if (maybe_want(self, TK_INCR)) {
             // FIXME: this isn't exactly the best way to do this
             expr = make_binary(EXPR_SUB, make_binary(EXPR_AS, expr,
-                make_binary(EXPR_ADD, expr, make_const(make_ty(TY_INT), 1))),
-                make_const(make_ty(TY_INT), 1));
+                make_binary(EXPR_ADD, expr, make_const_expr(make_ty(TY_INT), 1))),
+                make_const_expr(make_ty(TY_INT), 1));
             continue;
         }
         if (maybe_want(self, TK_DECR)) {
             expr = make_binary(EXPR_ADD, make_binary(EXPR_AS, expr,
-                make_binary(EXPR_SUB, expr, make_const(make_ty(TY_INT), 1))),
-                make_const(make_ty(TY_INT), 1));
+                make_binary(EXPR_SUB, expr, make_const_expr(make_ty(TY_INT), 1))),
+                make_const_expr(make_ty(TY_INT), 1));
             continue;
         }
         // FIXME: recognize compound literals here
@@ -239,18 +239,16 @@ expr_t *postfix_expression(cc3_t *self)
     }
 }
 
-static bool is_type_name(cc3_t *self, tk_t *tk);
-
 expr_t *unary_expression(cc3_t *self)
 {
     if (maybe_want(self, TK_INCR)) {
         expr_t *arg = unary_expression(self);
         return make_binary(EXPR_AS, arg,
-            make_binary(EXPR_ADD, arg, make_const(make_ty(TY_INT), 1)));
+            make_binary(EXPR_ADD, arg, make_const_expr(make_ty(TY_INT), 1)));
     } else if (maybe_want(self, TK_DECR)) {
         expr_t *arg = unary_expression(self);
         return make_binary(EXPR_AS, arg,
-            make_binary(EXPR_SUB, arg, make_const(make_ty(TY_INT), 1)));
+            make_binary(EXPR_SUB, arg, make_const_expr(make_ty(TY_INT), 1)));
     } else if (maybe_want(self, TK_AND)) {
         return make_unary(EXPR_REF, cast_expression(self));
     } else if (maybe_want(self, TK_MUL)) {
@@ -274,7 +272,7 @@ expr_t *unary_expression(cc3_t *self)
             // sizeof unary-expression
             ty = unary_expression(self)->ty;
         }
-        return make_const(make_ty(TY_ULONG), ty_size(ty));
+        return make_const_expr(make_ty(TY_ULONG), ty_size(ty));
     } else {
         return postfix_expression(self);
     }

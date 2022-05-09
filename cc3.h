@@ -391,7 +391,7 @@ enum {
     EXPR_CONST,
 
     // String literal
-    EXPR_STR_LIT,
+    EXPR_STR,
 
     EXPR_MEMB,  // Member access
     EXPR_CALL,  // Function call
@@ -456,7 +456,7 @@ struct expr {
 
         struct {
             char *data;
-        } as_str_lit;
+        } as_str;
 
         struct {
             expr_t *aggr;
@@ -482,9 +482,9 @@ struct expr {
     };
 };
 
-expr_t *make_sym(sema_t *self, const char *name);
-expr_t *make_const(ty_t *ty, val_t value);
-expr_t *make_str_lit(const char *str);
+expr_t *make_sym_expr(sema_t *self, const char *name);
+expr_t *make_const_expr(ty_t *ty, val_t value);
+expr_t *make_str_expr(char *data);
 
 expr_t *make_memb_expr(expr_t *aggr, const char *name);
 expr_t *make_cast_expr(ty_t *ty, expr_t *arg);

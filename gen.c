@@ -129,7 +129,7 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
 
     case TY_ARRAY:
         if (init->kind == INIT_EXPR) {                  // String literal
-            char *data = init->as_expr->as_str_lit.data;
+            char *data = init->as_expr->as_str.data;
             for (int i = 0; i < ty->array.cnt; ++i)
                 emit_data(self, "\t.byte\t0x%02x\n", data[i]);
         } else {                                        // Initializer list
@@ -152,9 +152,9 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
             emit_data(self, "\t%s\t%d\n", ty_data_word(ty),
                 init->as_expr->as_const.value);
             break;
-        case EXPR_STR_LIT:
+        case EXPR_STR:
             emit_data(self, "\t%s\t.LC%d\n", ty_data_word(ty),
-                emit_str_lit(self, init->as_expr->as_str_lit.data));
+                emit_str_lit(self, init->as_expr->as_str.data));
             break;
         default:
             err("Constant expression required");
@@ -243,9 +243,9 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
                 emit_code(self, "\tleaq\t%s(%%rip), %%rax\n", sym->asm_name);
         }
         break;
-    case EXPR_STR_LIT:
+    case EXPR_STR:
         emit_code(self, "\tleaq\t.LC%d(%%rip), %%rax\n",
-                    emit_str_lit(self, expr->as_str_lit.data));
+                    emit_str_lit(self, expr->as_str.data));
         break;
     case EXPR_MEMB:
         gen_addr(self, jmp_ctx, expr->as_memb.aggr);
@@ -300,7 +300,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 {
     switch (expr->kind) {
     case EXPR_SYM:
-    case EXPR_STR_LIT:
+    case EXPR_STR:
     case EXPR_MEMB:
     case EXPR_DREF:
     case EXPR_VA_ARG:
@@ -710,7 +710,7 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
         break;
     case TY_ARRAY:
         if (init->kind == INIT_EXPR) {                  // String literal
-            char *data = init->as_expr->as_str_lit.data;
+            char *data = init->as_expr->as_str.data;
             for (int i = 0; i < ty->array.cnt; ++i, ++offset)
                 emit_code(self, "\tmovb\t$0x%02x, %d(%%rbp)\n",
                     data[i], -(self->frame_size - offset));
