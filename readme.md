@@ -21,10 +21,10 @@ was compiling itself, as a result there are many TODOs:
 
 For compatibility with glibc's headers and general ergonomics, the following
 GNU extensions are supported on top of standard:
-- Statement expressions (used by glibc)
-- Alternative spelling of inline as __inline (used by glibc)
-- Anonymous structs/unions (used by glibc and the compiler itself)
+- Statement expressions (used by glibc and the compiler)
 - Case ranges in switches (used by the compiler itself)
+- Anonymous structs/unions (used by glibc and the compiler)
+- Alternative spelling of inline as __inline (used by glibc)
 
 # Design
 
@@ -87,7 +87,6 @@ as platform for language experiments.
 Right now the the main goals are:
 - Clear the list of TODOs above
 - Reduce hackiness of module interactions
-- Use more efficient data structures
 - Improve the quality of generated code
 
 # Copying

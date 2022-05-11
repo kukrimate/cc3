@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <stdint.h>
 
 /** Size of an array in elements **/
 #define ARRAY_SIZE(array) (sizeof (array) / sizeof *(array))
@@ -59,6 +60,51 @@ void string_reserve(string_t *self, size_t new_capacity);
 void string_push(string_t *self, char c);
 void string_vprintf(string_t *self, const char *fmt, va_list ap);
 void string_printf(string_t *self, const char *fmt, ...);
+
+/** Hash table **/
+
+typedef struct ty ty_t;
+typedef struct sym sym_t;
+
+enum {
+    ENTRY_EMPTY,
+    ENTRY_ACTIVE,
+    ENTRY_DELETED
+};
+
+typedef struct {
+    uint8_t state;
+    uint32_t hash;
+    const char *key;
+
+    union {
+        ty_t *as_ty;
+        sym_t *as_sym;
+        int as_int;
+    };
+} entry_t;
+
+typedef struct {
+    uint32_t count;     // # of active entries
+    uint32_t load;      // # of active + deleted entries
+    uint32_t capacity;  // Capacity of the array
+    entry_t *arr;
+} map_t;
+
+void map_init(map_t *self);
+void map_free(map_t *self);
+void map_clear(map_t *self);
+entry_t *map_find(map_t *self, const char *key);
+entry_t *map_find_or_insert(map_t *self, const char *key, bool *found);
+bool map_delete(map_t *self, const char *key);
+
+#define MAP_ITER(map, iter)                                         \
+    for (entry_t *iter = (map)->arr, *end = iter + (map)->capacity; \
+            ({                                                      \
+                while (iter < end && iter->state != ENTRY_ACTIVE)   \
+                    ++iter;                                         \
+                iter < end;                                         \
+             }); ++iter)
 
 /** Tokens **/
 
@@ -203,7 +249,6 @@ int lex_next(lexer_t *self, tk_t *tk);
 
 /** Types **/
 
-typedef struct ty ty_t;
 typedef struct memb memb_t;
 
 struct memb {
@@ -220,7 +265,6 @@ void define_struct(ty_t *ty, memb_t *members);
 void define_union(ty_t *ty, memb_t *members);
 
 typedef struct param param_t;
-typedef struct sym sym_t;
 
 struct param {
     param_t *next;
@@ -307,8 +351,6 @@ enum {
 };
 
 struct sym {
-    sym_t *next;
-
     // Symbol kind
     int kind;
 
@@ -319,26 +361,16 @@ struct sym {
     // Assembler symbol name
     char *asm_name;
 
-    // Was this defined or just declared (for SYM_EXTERN)
-    bool had_def;
     // Offset of the storage on the stack (for SYM_LOCAL)
     int offset;
     // Constant value of the symbol (for SYM_ENUM_CONST)
     val_t val;
 };
 
-typedef struct tag tag_t;
-
-struct tag {
-    tag_t *next;
-
-    ty_t *ty;
-};
-
 struct scope {
     scope_t *parent;
-    sym_t *syms;
-    tag_t *tags;
+    map_t syms;
+    map_t tags;
 };
 
 /** Semantic actions **/
@@ -583,26 +615,15 @@ stmt_t *make_stmt(int kind);
 
 /** Code generation **/
 
-typedef struct goto_label goto_label_t;
-
-struct goto_label {
-    goto_label_t *next;
-    char *name;
-    int label;
-};
-
 typedef struct gen gen_t;
 
 struct gen {
     /** Global state **/
-
+    int out_fd;
     // Next unique label #
     int label_cnt;
-
-    // Output code and data
-    string_t code;
-    string_t data;
-    string_t lits;
+    // String literals
+    map_t lits;
 
     /** Function state **/
 
@@ -615,37 +636,18 @@ struct gen {
     // Number of active temporaries
     int temp_cnt;
     // Jump targets for gotos
-    goto_label_t *goto_labels;
+    map_t gotos;
 };
 
-void gen_init(gen_t *self);
+void gen_init(gen_t *self, int out_fd);
 void gen_free(gen_t *self);
+
 void gen_static(gen_t *self, sym_t *sym, init_t *init);
 void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body);
+void gen_lits(gen_t *self);
 
-/** Compiler context **/
+/** Parser **/
 
-#define LOOKAHEAD_CNT 2
-
-typedef struct cc3 cc3_t;
-
-struct cc3 {
-    // Lexical analyzer
-    lexer_t lexer;
-
-    // Token buffer (FIFO)
-    tk_t tk_buf[LOOKAHEAD_CNT];
-    int tk_pos, tk_cnt;
-
-    // Semantic analyzer
-    sema_t sema;
-    // Code generator
-    gen_t gen;
-};
-
-void cc3_init(cc3_t *self, int in_fd);
-void cc3_free(cc3_t *self);
-
-void cc3_parse(cc3_t *self);
+void cc3_compile(int in_fd, int out_fd);
 
 #endif

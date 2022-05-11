@@ -2,14 +2,6 @@
 
 #include "cc3.h"
 
-static void write_asm(cc3_t *ctx, int outfd)
-{
-    // Output sections section
-    dprintf(outfd, ".text\n%s", ctx->gen.code.data);
-    dprintf(outfd, ".section .rodata\n%s", ctx->gen.lits.data);
-    dprintf(outfd, ".section .data\n%s", ctx->gen.data.data);
-}
-
 static int run_process(char **args)
 {
     pid_t pid = fork();
@@ -29,7 +21,7 @@ static int run_process(char **args)
     exit(errno);                            // Exit if execvp fails
 }
 
-static int do_assemble(cc3_t *ctx, char *out_path)
+static int do_assemble(int in_fd, char *out_path)
 {
     char asm_path[] = "/tmp/asmXXXXXX";
     int asm_fd = mkstemp(asm_path);
@@ -38,7 +30,7 @@ static int do_assemble(cc3_t *ctx, char *out_path)
         return -1;
 
     // Generate assembly
-    write_asm(ctx, asm_fd);
+    cc3_compile(in_fd, asm_fd);
 
     // Assemble
     char *args[] = { "as", "-o", out_path, asm_path, NULL };
@@ -49,7 +41,7 @@ static int do_assemble(cc3_t *ctx, char *out_path)
     return err;
 }
 
-static int do_link(cc3_t *ctx, char *out_path)
+static int do_link(int in_fd, char *out_path)
 {
     char obj_path[] = "/tmp/objXXXXXX";
     int obj_fd = mkstemp(obj_path);
@@ -58,7 +50,7 @@ static int do_link(cc3_t *ctx, char *out_path)
         return -1;
 
     // Run assembler
-    int err = do_assemble(ctx, obj_path);
+    int err = do_assemble(in_fd, obj_path);
 
     // Run linker
     if (err == 0) {
@@ -110,34 +102,28 @@ int main(int argc, char **argv)
     }
 
     // Setup context
-    cc3_t ctx;
-    cc3_init(&ctx, in_fd);
 
-    // Parse file
-    cc3_parse(&ctx);
 
     // Perform the actions requested by the user
     if (opt_S) {
         int out_fd = open(output_path, O_CREAT | O_WRONLY, 0666);
         if (out_fd < 0)
             goto err;
-        write_asm(&ctx, out_fd);
+        cc3_compile(in_fd, out_fd);
         close(out_fd);
     } else if (opt_c) {
-        if (do_assemble(&ctx, output_path) < 0)
+        if (do_assemble(in_fd, output_path) < 0)
             goto err;
     } else {
-        if (do_link(&ctx, output_path) < 0)
+        if (do_link(in_fd, output_path) < 0)
             goto err;
     }
 
-    cc3_free(&ctx);
     close(in_fd);
     return 0;
 
 err:
     perror("cc3");
-    cc3_free(&ctx);
     close(in_fd);
     return 1;
 }

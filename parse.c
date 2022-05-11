@@ -2,9 +2,29 @@
 
 #include "cc3.h"
 
+/** Compiler context **/
+
+#define LOOKAHEAD_CNT 2
+
+typedef struct cc3 cc3_t;
+
+struct cc3 {
+    // Lexical analyzer
+    lexer_t lexer;
+
+    // Token buffer (FIFO)
+    tk_t tk_buf[LOOKAHEAD_CNT];
+    int tk_pos, tk_cnt;
+
+    // Semantic analyzer
+    sema_t sema;
+    // Code generator
+    gen_t gen;
+};
+
 /** Initialization **/
 
-void cc3_init(cc3_t *self, int in_fd)
+static void cc3_init(cc3_t *self, int in_fd, int out_fd)
 {
     lex_init(&self->lexer, in_fd);
     self->tk_pos = 0;
@@ -14,10 +34,10 @@ void cc3_init(cc3_t *self, int in_fd)
         string_init(&self->tk_buf[i].str);
     }
     sema_init(&self->sema);
-    gen_init(&self->gen);
+    gen_init(&self->gen, out_fd);
 }
 
-void cc3_free(cc3_t *self)
+static void cc3_free(cc3_t *self)
 {
     lex_free(&self->lexer);
     for (int i = 0; i < LOOKAHEAD_CNT; ++i) {
@@ -1284,9 +1304,6 @@ static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
     if (ty->kind != TY_FUNCTION)
         err("Expected function type instead of %T", ty);
 
-    // Mark the symbol as having a definition
-    sym->had_def = true;
-
     // HACK!: zero sema's picture of the frame size before
     // entering the context of a new function
     self->sema.func_name = sym->name;
@@ -1331,8 +1348,9 @@ static void external_declaration(cc3_t *self, int sc, ty_t *ty, char *name)
         gen_static(&self->gen, sym, initializer(self, sym->ty));
 }
 
-void cc3_parse(cc3_t *self)
+static void translation_unit(cc3_t *self)
 {
+    // Read function definitions and declarations
     for (;;) {
         int sc;
         ty_t *base_ty = declaration_specifiers(self, &sc);
@@ -1357,4 +1375,17 @@ void cc3_parse(cc3_t *self)
         }
     }
     want(self, TK_EOF);
+
+    // Dump out the string literals we have collected
+    gen_lits(&self->gen);
+}
+
+/** External API **/
+
+void cc3_compile(int in_fd, int out_fd)
+{
+    cc3_t ctx;
+    cc3_init(&ctx, in_fd, out_fd);
+    translation_unit(&ctx);
+    cc3_free(&ctx);
 }

@@ -317,12 +317,16 @@ void sema_enter(sema_t *self)
     if (!scope) abort();
     scope->parent = self->scope;
     self->scope = scope;
+    map_init(&scope->syms);
+    map_init(&scope->tags);
 }
 
 void sema_exit(sema_t *self)
 {
     scope_t *scope = self->scope;
     self->scope = scope->parent;
+    map_free(&scope->syms);
+    map_free(&scope->tags);
 }
 
 void sema_push(sema_t *self, scope_t *scope)
@@ -364,22 +368,27 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
 {
     debugln("Declare %s: %T", name, ty);
 
-    // Look for previous declaration in the current scope
-    sym_t *sym;
-    for (sym = self->scope->syms; sym; sym = sym->next)
-        if (!strcmp(sym->name, name))
-            break;
+    // Figure out the symbol kind
+    int kind = sym_kind(self, sc);
 
-    if (sym) {
-        int new_kind = sym_kind(self, sc);
+    // Variables cannot be declared as void
+    if (kind != SYM_TYPEDEF && ty->kind == TY_VOID)
+        err("Tried to declare %s with type void", name);
+
+    // Look for previous declaration in the current scope
+    bool found;
+    entry_t *entry = map_find_or_insert(&self->scope->syms, name, &found);
+
+    if (found) {
+        sym_t *sym = entry->as_sym;
 
         switch (sym->kind) {
         case SYM_EXTERN:
         case SYM_STATIC:
-            if (new_kind == SYM_EXTERN) { // OK
+            if (kind == SYM_EXTERN) { // OK
                 break;
             }
-            if (new_kind == SYM_STATIC) { // OK
+            if (kind == SYM_STATIC) { // OK
                 sym->kind = SYM_STATIC;
                 break;
             }
@@ -395,18 +404,10 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
         return sym;
     }
 
-    // Add new symbol to current scope
-    sym = calloc(1, sizeof *sym);
+    // Create symbol
+    sym_t *sym = calloc(1, sizeof *sym);
     if (!sym) abort();
-    sym->next = self->scope->syms;
-    self->scope->syms = sym;
-
     sym->kind = sym_kind(self, sc);
-
-    // Variables cannot be declared as void
-    if (sym->kind != SYM_TYPEDEF && ty->kind == TY_VOID)
-        err("Tried to declare %s with type void", name);
-
     sym->ty = ty;
     sym->name = name;
 
@@ -419,6 +420,9 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     } else {
         sym->asm_name = sym->name;
     }
+
+    // Add it to the symbol table
+    entry->as_sym = sym;
 
     return sym;
 }
@@ -437,93 +441,95 @@ void sema_alloc_local(sema_t *self, sym_t *sym)
 sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val)
 {
     // Look for previous declaration in the current scope
-    for (sym_t *sym = self->scope->syms; sym; sym = sym->next)
-        if (!strcmp(sym->name, name))
-            err("Invalid re-declaration of %s", name);
+    bool found;
+    entry_t *entry = map_find_or_insert(&self->scope->syms, name, &found);
 
-    // If not found we are good to declare it
+    if (found)
+        err("Re-declaration of enumeration constant %s", name);
+
+    // Create symbol
     sym_t *sym = calloc(1, sizeof *sym);
     if (!sym) abort();
-    sym->next = self->scope->syms;
-    self->scope->syms = sym;
     sym->kind = SYM_ENUM_CONST;
     sym->name = name;
     sym->val = val;
+
+    // Declare it in the current scope
+    entry->as_sym = sym;
+
     return sym;
 }
 
 sym_t *sema_lookup(sema_t *self, const char *name)
 {
-    for (scope_t *scope = self->scope; scope; scope = scope->parent)
-        for (sym_t *sym = scope->syms; sym; sym = sym->next)
-            if (!strcmp(sym->name, name))
-                return sym;
+    for (scope_t *scope = self->scope; scope; scope = scope->parent) {
+        entry_t *entry = map_find(&scope->syms, name);
+        if (entry)
+            return entry->as_sym;
+    }
     return NULL;
 }
 
 ty_t *sema_findtypedef(sema_t *self, const char *name)
 {
-    struct sym *sym = sema_lookup(self, name);
+    sym_t *sym = sema_lookup(self, name);
     if (sym && sym->kind == SYM_TYPEDEF)
         return sym->ty;
     return NULL;
 }
 
-static void create_tag(sema_t *self, ty_t *ty)
-{
-    tag_t *tag = calloc(1, sizeof *tag);
-    if (!tag) abort();
-    tag->next = self->scope->tags;
-    self->scope->tags = tag;
-    tag->ty = ty;
-}
-
 ty_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
 {
-    // Look for tags in any scope
-    tag_t *tag = NULL;
+    // Look for name in any scope
+    entry_t *entry = NULL;
     for (scope_t *scope = self->scope; scope; scope = scope->parent)
-        for (tag = scope->tags; tag; tag = tag->next)
-            if (!strcmp(tag->ty->as_aggregate.name, name))
-                goto found;
-found:
+        if ((entry = map_find(&scope->tags, name)))
+            break;
 
-    if (tag) {
+    if (entry) {
         // Make sure the right keyword is used to refer to the tag
-        if (tag->ty->kind != kind)
+        if (entry->as_ty->kind != kind)
             err("Tag referred to with the wrong keyword");
         // Return the type associated with the tag we found
-        return tag->ty;
-    } else {
-        // If no tag was found, we create one in the current scope
-        ty_t *ty = make_ty(kind);
-        ty->as_aggregate.name = strdup(name);
-        create_tag(self, ty);
-        return ty;
+        return entry->as_ty;
     }
+
+    bool found;
+    entry = map_find_or_insert(&self->scope->tags, name, &found);
+    assert(!found);
+
+    // Create type
+    ty_t *ty = make_ty(kind);
+    ty->as_aggregate.name = strdup(name);
+
+    // Add it to the current scope
+    entry->key = ty->as_aggregate.name;
+    entry->as_ty = ty;
+
+    return ty;
 }
 
 ty_t *sema_define_tag(sema_t *self, int kind, const char *name)
 {
-    // Look for tags just in the current scope
-    tag_t *tag = NULL;
-    for (tag = self->scope->tags; tag; tag = tag->next)
-        if (!strcmp(tag->ty->as_aggregate.name, name))
-            break;
+    // Look for name just in the current scope
+    bool found;
+    entry_t *entry = map_find_or_insert(&self->scope->tags, name, &found);
 
-    if (tag) {
+    if (found) {
         // Make sure the right keyword is used to refer to the tag
-        if (tag->ty->kind != kind)
+        if (entry->as_ty->kind != kind)
             err("Tag referred to with the wrong keyword");
         // Return the type associated with the tag we found
-        return tag->ty;
-    } else {
-        // If no tag was found, we create one in the current scope
-        ty_t *ty = make_ty(kind);
-        ty->as_aggregate.name = strdup(name);
-        create_tag(self, ty);
-        return ty;
+        return entry->as_ty;
     }
+
+    // Create new type
+    ty_t *ty = make_ty(kind);
+    ty->as_aggregate.name = strdup(name);
+    // Add it to the current scope
+    entry->key = ty->as_aggregate.name;
+    entry->as_ty = ty;
+    return ty;
 }
 
 static expr_t *alloc_expr(int kind)
