@@ -564,9 +564,8 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             self->fp_offset);
         // Fill the pointers
         emit(self,
-            "\tleaq\t%d(%%rbp), %%rcx\n"
-            "\tmovq\t%%rcx, 8(%%rax)\n",        // overflow_arg_area
-            -(self->frame_size - self->oflo));
+            "\tleaq\t16(%%rbp), %%rcx\n"
+            "\tmovq\t%%rcx, 8(%%rax)\n");       // overflow_arg_area
         emit(self,
             "\tleaq\t%d(%%rbp), %%rcx\n"
             "\tmovq\t%%rcx, 16(%%rax)\n",
@@ -983,7 +982,6 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
     // Starting values for va_lists
     self->gp_offset = gp * 8;
     self->fp_offset = 48;
-    self->oflo = align(oflo, 8);
 
     // Spill the rest of the registers for varargs
     if (sym->ty->function.var)
