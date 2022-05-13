@@ -8,12 +8,13 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <stdint.h>
+#include "vec.h"
 
 /** Size of an array in elements **/
 #define ARRAY_SIZE(array) (sizeof (array) / sizeof *(array))
@@ -104,7 +105,7 @@ bool map_delete(map_t *self, const char *key);
                 while (iter < end && iter->state != ENTRY_ACTIVE)   \
                     ++iter;                                         \
                 iter < end;                                         \
-             }); ++iter)
+            }); ++iter)
 
 /** Tokens **/
 
@@ -140,6 +141,7 @@ enum {
     TK_STRUCT,
     TK_SWITCH,
     TK_TYPEDEF,
+    TK_TYPEOF,
     TK_UNION,
     TK_UNSIGNED,
     TK_VOID,
@@ -275,28 +277,46 @@ struct param {
 
 param_t *make_param(ty_t *ty, sym_t *sym);
 
+// Type kinds are a non-overlapping bitflag collection. This allows cheap
+// testing for a group of types.
+
 enum {
-    TY_VOID,
-    TY_CHAR,
-    TY_SCHAR,
-    TY_UCHAR,
-    TY_SHORT,
-    TY_USHORT,
-    TY_INT,
-    TY_UINT,
-    TY_LONG,
-    TY_ULONG,
-    TY_LLONG,
-    TY_ULLONG,
-    TY_FLOAT,
-    TY_DOUBLE,
-    TY_LDOUBLE,
-    TY_BOOL,
-    TY_STRUCT,
-    TY_UNION,
-    TY_POINTER,
-    TY_ARRAY,
-    TY_FUNCTION,
+    TY_VOID     = (1 << 0),
+    TY_BOOL     = (1 << 1),
+    TY_CHAR     = (1 << 2),
+    TY_SCHAR    = (1 << 3),
+    TY_UCHAR    = (1 << 4),
+    TY_SHORT    = (1 << 5),
+    TY_USHORT   = (1 << 6),
+    TY_INT      = (1 << 7),
+    TY_UINT     = (1 << 8),
+    TY_LONG     = (1 << 9),
+    TY_ULONG    = (1 << 10),
+    TY_LLONG    = (1 << 11),
+    TY_ULLONG   = (1 << 12),
+    TY_FLOAT    = (1 << 13),
+    TY_DOUBLE   = (1 << 14),
+    TY_LDOUBLE  = (1 << 15),
+    TY_STRUCT   = (1 << 16),
+    TY_UNION    = (1 << 17),
+    TY_POINTER  = (1 << 18),
+    TY_ARRAY    = (1 << 19),
+    TY_FUNCTION = (1 << 20),
+
+    // Types where the integer promotions apply
+    TY_PROMOTE_MASK = TY_BOOL | TY_CHAR | TY_SCHAR
+                    | TY_UCHAR | TY_SHORT | TY_USHORT,
+
+    // Integer types
+    TY_INT_MASK = TY_BOOL | TY_CHAR | TY_SCHAR | TY_UCHAR
+                | TY_SHORT | TY_USHORT | TY_INT | TY_UINT
+                | TY_LONG | TY_ULONG | TY_LLONG | TY_ULLONG,
+
+    // Arithmetic type
+    TY_ARITH_MASK = TY_INT_MASK | TY_FLOAT | TY_DOUBLE | TY_LDOUBLE,
+
+    // Scalar type
+    TY_SCALAR_MASK = TY_ARITH_MASK | TY_POINTER,
 };
 
 typedef struct scope scope_t;
@@ -304,12 +324,13 @@ typedef struct scope scope_t;
 struct ty {
     int kind;
 
+    int align;
+    int size;
+
     union {
         struct {
             char *name;
             memb_t *members;
-            int align;
-            int size;
         } as_aggregate;
 
         struct {
@@ -330,6 +351,23 @@ struct ty {
     };
 };
 
+extern ty_t ty_void;
+extern ty_t ty_char;
+extern ty_t ty_schar;
+extern ty_t ty_uchar;
+extern ty_t ty_short;
+extern ty_t ty_ushort;
+extern ty_t ty_int;
+extern ty_t ty_uint;
+extern ty_t ty_long;
+extern ty_t ty_ulong;
+extern ty_t ty_llong;
+extern ty_t ty_ullong;
+extern ty_t ty_float;
+extern ty_t ty_double;
+extern ty_t ty_ldouble;
+extern ty_t ty_bool;
+
 ty_t *make_ty(int kind);
 ty_t *make_pointer(ty_t *base_ty);
 ty_t *make_array(ty_t *elem_ty, int cnt);
@@ -337,8 +375,7 @@ ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var);
 
 void print_ty(ty_t *ty);
 
-int ty_align(ty_t *ty);
-int ty_size(ty_t *ty);
+bool compare_ty(ty_t *ty1, ty_t *ty2, bool permit_void_ptr);
 
 /** Symbol table **/
 
@@ -415,66 +452,57 @@ ty_t *sema_define_tag(sema_t *self, int kind, const char *name);
 
 /** Expressions **/
 
+typedef struct expr expr_t;
+typedef struct stmt stmt_t;
+
+VEC_DEF(expr_vec, expr_t *)
+
 enum {
-    // Symbol
     EXPR_SYM,
-
-    // Constant
     EXPR_CONST,
-
-    // String literal
     EXPR_STR,
 
-    EXPR_MEMB,  // Member access
-    EXPR_CALL,  // Function call
+    EXPR_MEMB,
+    EXPR_CALL,
 
-    EXPR_REF,   // Pointer creation
-    EXPR_DREF,  // Pointer indirection
-
-    EXPR_CAST,  // Type conversion
-
-    EXPR_NEG,   // Unary arithmetic
+    EXPR_REF,
+    EXPR_DREF,
+    EXPR_NEG,
     EXPR_NOT,
+    EXPR_LNOT,
 
-    EXPR_MUL,   // Binary arithmetic
+    EXPR_CAST,
+
+    EXPR_MUL,
     EXPR_DIV,
     EXPR_MOD,
     EXPR_ADD,
     EXPR_SUB,
     EXPR_LSH,
     EXPR_RSH,
-    EXPR_AND,
-    EXPR_XOR,
-    EXPR_OR,
-
-    EXPR_LT,    // Boolean expressions
+    EXPR_LT,
     EXPR_GT,
     EXPR_LE,
     EXPR_GE,
     EXPR_EQ,
     EXPR_NE,
-    EXPR_LNOT,
+    EXPR_AND,
+    EXPR_XOR,
+    EXPR_OR,
     EXPR_LAND,
     EXPR_LOR,
+    EXPR_COND,
+    EXPR_AS,
+    EXPR_SEQ,
 
-    EXPR_AS,    // Assignment
-    EXPR_COND,  // Conditional
-    EXPR_SEQ,   // Comma operator
+    EXPR_STMT,  // [GNU]
 
-    EXPR_STMT,  // [GNU] Statement expression
-
-    // Varargs built-ins, these cannot just be built-in decls :/
     EXPR_VA_START,
     EXPR_VA_END,
     EXPR_VA_ARG,
 };
 
-typedef struct expr expr_t;
-typedef struct stmt stmt_t;
-
 struct expr {
-    expr_t *next;
-
     int kind;
 
     ty_t *ty;
@@ -492,8 +520,14 @@ struct expr {
 
         struct {
             expr_t *aggr;
+            char *name;
             int offset;
         } as_memb;
+
+        struct {
+            expr_t *func;
+            expr_vec_t args;
+        } as_call;
 
         struct {
             expr_t *arg;
@@ -514,18 +548,50 @@ struct expr {
     };
 };
 
+expr_t *alloc_expr(int kind);
+
 expr_t *make_sym_expr(sema_t *self, const char *name);
 expr_t *make_const_expr(ty_t *ty, val_t value);
 expr_t *make_str_expr(char *data);
 
 expr_t *make_memb_expr(expr_t *aggr, const char *name);
+expr_t *make_call_expr(expr_t *func, expr_vec_t *args);
+
+expr_t *make_ref_expr(expr_t *arg);
+expr_t *make_dref_expr(expr_t *arg);
+expr_t *make_pos_expr(expr_t *arg);
+expr_t *make_neg_expr(expr_t *arg);
+expr_t *make_not_expr(expr_t *arg);
+expr_t *make_lnot_expr(expr_t *arg);
+expr_t *make_sizeof_expr(ty_t *ty);
+
 expr_t *make_cast_expr(ty_t *ty, expr_t *arg);
 
-expr_t *make_unary(int kind, expr_t *arg);
-expr_t *make_binary(int kind, expr_t *lhs, expr_t *rhs);
-expr_t *make_trinary(int kind, expr_t *arg1, expr_t *arg2, expr_t *arg3);
+expr_t *make_mul_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_div_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_mod_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_add_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_sub_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_lsh_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_rsh_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_lt_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_gt_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_le_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_ge_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_eq_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_ne_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_and_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_xor_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_or_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_land_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_lor_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_cond_expr(expr_t *cond, expr_t *val1, expr_t *val2);
+expr_t *make_as_expr(expr_t *lhs, expr_t *rhs);
+expr_t *make_seq_expr(expr_t *lhs, expr_t *rhs);
 
 expr_t *make_stmt_expr(stmt_t *body);
+
+void print_expr(expr_t *expr);
 
 /** Initializer **/
 
@@ -567,7 +633,7 @@ enum {
     STMT_BREAK,
     STMT_RETURN,
     STMT_EVAL,
-    STMT_INIT,
+    STMT_DECL,
 };
 
 struct stmt {
@@ -606,12 +672,14 @@ struct stmt {
 
         struct {
             sym_t *sym;
-            init_t *value;
-        } as_init;
+            init_t *init;
+        } as_decl;
     };
 };
 
 stmt_t *make_stmt(int kind);
+
+void print_stmts(stmt_t *stmt, int indent);
 
 /** Code generation **/
 

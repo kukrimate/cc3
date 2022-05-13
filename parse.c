@@ -148,8 +148,10 @@ expr_t *primary_expression(cc3_t *self)
     switch (tk->type) {
     case TK_IDENTIFIER:
         if (!strcmp(tk_str(tk), "__builtin_va_start")) {
+            expr = alloc_expr(EXPR_VA_START);
+            expr->ty = &ty_void;
             want(self, TK_LPAREN);
-            expr = make_unary(EXPR_VA_START, assignment_expression(self));
+            expr->as_unary.arg = assignment_expression(self);
             want(self, TK_COMMA);
             // Per C standard we take the last non-variadic parameter as an
             // argument, however we already know which one it is, so we can
@@ -159,14 +161,17 @@ expr_t *primary_expression(cc3_t *self)
             break;
         }
         if (!strcmp(tk_str(tk), "__builtin_va_end")) {
+            expr = alloc_expr(EXPR_VA_END);
+            expr->ty = &ty_void;
             want(self, TK_LPAREN);
-            expr = make_unary(EXPR_VA_END, assignment_expression(self));
+            expr->as_unary.arg = assignment_expression(self);
             want(self, TK_RPAREN);
             break;
         }
         if (!strcmp(tk_str(tk), "__builtin_va_arg")) {
+            expr = alloc_expr(EXPR_VA_ARG);
             want(self, TK_LPAREN);
-            expr = make_unary(EXPR_VA_ARG, assignment_expression(self));
+            expr->as_unary.arg = assignment_expression(self);
             want(self, TK_COMMA);
             expr->ty = type_name(self);
             want(self, TK_RPAREN);
@@ -176,7 +181,7 @@ expr_t *primary_expression(cc3_t *self)
         expr = make_sym_expr(&self->sema, tk_str(tk));
         break;
     case TK_CONSTANT:
-        expr = make_const_expr(make_ty(TY_INT), tk->val);
+        expr = make_const_expr(&ty_int, tk->val);
         break;
     case TK_STR_LIT:
         {
@@ -214,21 +219,21 @@ expr_t *postfix_expression(cc3_t *self)
 
     for (;;) {
         if (maybe_want(self, TK_LSQ)) {
-            expr = make_unary(EXPR_DREF,
-                make_binary(EXPR_ADD, expr, expression(self)));
+            expr = make_dref_expr(make_add_expr(expr, expression(self)));
             want(self, TK_RSQ);
             continue;
         }
         if (maybe_want(self, TK_LPAREN)) {
-            expr_t *args = NULL, **tail = &args;
+            expr_vec_t args;
+            expr_vec_init(&args);
+
             if (!maybe_want(self, TK_RPAREN)) {
-                do {
-                    *tail = assignment_expression(self);
-                    tail = &(*tail)->next;
-                } while (maybe_want(self, TK_COMMA));
+                do
+                    *expr_vec_push(&args) = assignment_expression(self);
+                while (maybe_want(self, TK_COMMA));
                 want(self, TK_RPAREN);
             }
-            expr = make_binary(EXPR_CALL, expr, args);
+            expr = make_call_expr(expr, &args);
             continue;
         }
         if (maybe_want(self, TK_DOT)) {
@@ -238,20 +243,18 @@ expr_t *postfix_expression(cc3_t *self)
         }
         if (maybe_want(self, TK_ARROW)) {
             const char *name = tk_str(want(self, TK_IDENTIFIER));
-            expr = make_memb_expr(make_unary(EXPR_DREF, expr), name);
+            expr = make_memb_expr(make_dref_expr(expr), name);
             continue;
         }
         if (maybe_want(self, TK_INCR)) {
             // FIXME: this isn't exactly the best way to do this
-            expr = make_binary(EXPR_SUB, make_binary(EXPR_AS, expr,
-                make_binary(EXPR_ADD, expr, make_const_expr(make_ty(TY_INT), 1))),
-                make_const_expr(make_ty(TY_INT), 1));
+            expr = make_sub_expr(make_as_expr(expr, make_add_expr(expr,
+                make_const_expr(&ty_int, 1))), make_const_expr(&ty_int, 1));
             continue;
         }
         if (maybe_want(self, TK_DECR)) {
-            expr = make_binary(EXPR_ADD, make_binary(EXPR_AS, expr,
-                make_binary(EXPR_SUB, expr, make_const_expr(make_ty(TY_INT), 1))),
-                make_const_expr(make_ty(TY_INT), 1));
+            expr = make_add_expr(make_as_expr(expr, make_sub_expr(expr,
+                make_const_expr(&ty_int, 1))), make_const_expr(&ty_int, 1));
             continue;
         }
         // FIXME: recognize compound literals here
@@ -263,24 +266,22 @@ expr_t *unary_expression(cc3_t *self)
 {
     if (maybe_want(self, TK_INCR)) {
         expr_t *arg = unary_expression(self);
-        return make_binary(EXPR_AS, arg,
-            make_binary(EXPR_ADD, arg, make_const_expr(make_ty(TY_INT), 1)));
+        return make_as_expr(arg, make_add_expr(arg, make_const_expr(&ty_int, 1)));
     } else if (maybe_want(self, TK_DECR)) {
         expr_t *arg = unary_expression(self);
-        return make_binary(EXPR_AS, arg,
-            make_binary(EXPR_SUB, arg, make_const_expr(make_ty(TY_INT), 1)));
+        return make_as_expr(arg, make_sub_expr(arg, make_const_expr(&ty_int, 1)));
     } else if (maybe_want(self, TK_AND)) {
-        return make_unary(EXPR_REF, cast_expression(self));
+        return make_ref_expr(cast_expression(self));
     } else if (maybe_want(self, TK_MUL)) {
-        return make_unary(EXPR_DREF, cast_expression(self));
+        return make_dref_expr(cast_expression(self));
     } else if (maybe_want(self, TK_ADD)) {
-        return cast_expression(self);
+        return make_pos_expr(cast_expression(self));
     } else if (maybe_want(self, TK_SUB)) {
-        return make_unary(EXPR_NEG, cast_expression(self));
+        return make_neg_expr(cast_expression(self));
     } else if (maybe_want(self, TK_NOT)) {
-        return make_unary(EXPR_NOT, cast_expression(self));
+        return make_not_expr(cast_expression(self));
     } else if (maybe_want(self, TK_LNOT)) {
-        return make_unary(EXPR_LNOT, cast_expression(self));
+        return make_lnot_expr(cast_expression(self));
     } else if (maybe_want(self, TK_SIZEOF)) {
         ty_t *ty;
         if (peek(self, 0)->type == TK_LPAREN && is_type_name(self, peek(self, 1))) {
@@ -292,7 +293,7 @@ expr_t *unary_expression(cc3_t *self)
             // sizeof unary-expression
             ty = unary_expression(self)->ty;
         }
-        return make_const_expr(make_ty(TY_ULONG), ty_size(ty));
+        return make_sizeof_expr(ty);
     } else {
         return postfix_expression(self);
     }
@@ -316,11 +317,11 @@ expr_t *multiplicative_expression(cc3_t *self)
     expr_t *lhs = cast_expression(self);
     for (;;)
         if (maybe_want(self, TK_MUL))
-            lhs = make_binary(EXPR_MUL, lhs, cast_expression(self));
+            lhs = make_mul_expr(lhs, cast_expression(self));
         else if (maybe_want(self, TK_DIV))
-            lhs = make_binary(EXPR_DIV, lhs, cast_expression(self));
+            lhs = make_div_expr(lhs, cast_expression(self));
         else if (maybe_want(self, TK_MOD))
-            lhs = make_binary(EXPR_MOD, lhs, cast_expression(self));
+            lhs = make_mod_expr(lhs, cast_expression(self));
         else
             return lhs;
 }
@@ -330,9 +331,9 @@ expr_t *additive_expression(cc3_t *self)
     expr_t *lhs = multiplicative_expression(self);
     for (;;)
         if (maybe_want(self, TK_ADD))
-            lhs = make_binary(EXPR_ADD, lhs, multiplicative_expression(self));
+            lhs = make_add_expr(lhs, multiplicative_expression(self));
         else if (maybe_want(self, TK_SUB))
-            lhs = make_binary(EXPR_SUB, lhs, multiplicative_expression(self));
+            lhs = make_sub_expr(lhs, multiplicative_expression(self));
         else
             return lhs;
 }
@@ -342,9 +343,9 @@ expr_t *shift_expression(cc3_t *self)
     expr_t *lhs = additive_expression(self);
     for (;;)
         if (maybe_want(self, TK_LSH))
-            lhs = make_binary(EXPR_LSH, lhs, additive_expression(self));
+            lhs = make_lsh_expr(lhs, additive_expression(self));
         else if (maybe_want(self, TK_RSH))
-            lhs = make_binary(EXPR_RSH, lhs, additive_expression(self));
+            lhs = make_rsh_expr(lhs, additive_expression(self));
         else
             return lhs;
 }
@@ -354,13 +355,13 @@ expr_t *relational_expression(cc3_t *self)
     expr_t *lhs = shift_expression(self);
     for (;;)
         if (maybe_want(self, TK_LT))
-            lhs = make_binary(EXPR_LT, lhs, shift_expression(self));
+            lhs = make_lt_expr(lhs, shift_expression(self));
         else if (maybe_want(self, TK_GT))
-            lhs = make_binary(EXPR_GT, lhs, shift_expression(self));
+            lhs = make_gt_expr(lhs, shift_expression(self));
         else if (maybe_want(self, TK_LE))
-            lhs = make_binary(EXPR_LE, lhs, shift_expression(self));
+            lhs = make_le_expr(lhs, shift_expression(self));
         else if (maybe_want(self, TK_GE))
-            lhs = make_binary(EXPR_GE, lhs, shift_expression(self));
+            lhs = make_ge_expr(lhs, shift_expression(self));
         else
             return lhs;
 }
@@ -370,9 +371,9 @@ expr_t *equality_expression(cc3_t *self)
     expr_t *lhs = relational_expression(self);
     for (;;)
         if (maybe_want(self, TK_EQ))
-            lhs = make_binary(EXPR_EQ, lhs, relational_expression(self));
+            lhs = make_eq_expr(lhs, relational_expression(self));
         else if (maybe_want(self, TK_NE))
-            lhs = make_binary(EXPR_NE, lhs, relational_expression(self));
+            lhs = make_ne_expr(lhs, relational_expression(self));
         else
             return lhs;
 }
@@ -381,7 +382,7 @@ expr_t *and_expression(cc3_t *self)
 {
     expr_t *lhs = equality_expression(self);
     while (maybe_want(self, TK_AND))
-        lhs = make_binary(EXPR_AND, lhs, equality_expression(self));
+        lhs = make_and_expr(lhs, equality_expression(self));
     return lhs;
 }
 
@@ -389,7 +390,7 @@ expr_t *xor_expression(cc3_t *self)
 {
     expr_t *lhs = and_expression(self);
     while (maybe_want(self, TK_XOR))
-        lhs = make_binary(EXPR_XOR, lhs, and_expression(self));
+        lhs = make_xor_expr(lhs, and_expression(self));
     return lhs;
 }
 
@@ -397,7 +398,7 @@ expr_t *or_expression(cc3_t *self)
 {
     expr_t *lhs = xor_expression(self);
     while (maybe_want(self, TK_OR))
-        lhs = make_binary(EXPR_OR, lhs, xor_expression(self));
+        lhs = make_or_expr(lhs, xor_expression(self));
     return lhs;
 }
 
@@ -405,7 +406,7 @@ expr_t *land_expression(cc3_t *self)
 {
     expr_t *lhs = or_expression(self);
     while (maybe_want(self, TK_LAND))
-        lhs = make_binary(EXPR_LAND, lhs, or_expression(self));
+        lhs = make_land_expr(lhs, or_expression(self));
     return lhs;
 }
 
@@ -413,7 +414,7 @@ expr_t *lor_expression(cc3_t *self)
 {
     expr_t *lhs = land_expression(self);
     while (maybe_want(self, TK_LOR))
-        lhs = make_binary(EXPR_LOR, lhs, land_expression(self));
+        lhs = make_lor_expr(lhs, land_expression(self));
     return lhs;
 }
 
@@ -424,44 +425,44 @@ expr_t *conditional_expression(cc3_t *self)
         return lhs;
     expr_t *mid = expression(self);
     want(self, TK_COLON);
-    return make_trinary(EXPR_COND, lhs, mid, conditional_expression(self));
+    return make_cond_expr(lhs, mid, conditional_expression(self));
 }
 
 expr_t *assignment_expression(cc3_t *self)
 {
     expr_t *lhs = conditional_expression(self);
     if (maybe_want(self, TK_AS))
-        return make_binary(EXPR_AS, lhs, assignment_expression(self));
+        return make_as_expr(lhs, assignment_expression(self));
     else if (maybe_want(self, TK_MUL_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_MUL, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_mul_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_DIV_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_DIV, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_div_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_MOD_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_MOD, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_mod_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_ADD_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_ADD, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_add_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_SUB_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_SUB, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_sub_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_LSH_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_LSH, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_lsh_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_RSH_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_RSH, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_rsh_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_AND_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_AND, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_and_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_XOR_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_XOR, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_xor_expr(lhs, assignment_expression(self)));
     else if (maybe_want(self, TK_OR_AS))
-        return make_binary(EXPR_AS, lhs,
-                make_binary(EXPR_OR, lhs, assignment_expression(self)));
+        return make_as_expr(lhs,
+                make_or_expr(lhs, assignment_expression(self)));
     else
         return lhs;
 }
@@ -470,7 +471,7 @@ expr_t *expression(cc3_t *self)
 {
     expr_t *lhs = assignment_expression(self);
     while (maybe_want(self, TK_COMMA))
-        lhs = make_binary(EXPR_SEQ, lhs, assignment_expression(self));
+        lhs = make_seq_expr(lhs, assignment_expression(self));
     return lhs;
 }
 
@@ -662,40 +663,40 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
 
     static const struct {
         int ts[NUM_TS];
-        int kind;
+        ty_t *ty;
     } ts_map[] = {
         //  V  C  S  I  L  F  D  S  U  B  C  I
-        { { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_VOID      },  // void
-        { { 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_CHAR      },  // char
-        { { 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_SCHAR     },  // signed char
-        { { 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_UCHAR     },  // unsigned char
-        { { 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_SHORT     },  // short
-        { { 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_SHORT     },  // signed short
-        { { 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_SHORT     },  // short int
-        { { 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_SHORT     },  // signed short int
-        { { 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_USHORT    },  // unsigned short
-        { { 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_USHORT    },  // unsigned short int
-        { { 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, }, TY_INT       },  // int
-        { { 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_INT       },  // signed
-        { { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, }, TY_INT       },  // signed int
-        { { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_UINT      },  // unsigned
-        { { 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, }, TY_UINT      },  // unsigned int
-        { { 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, }, TY_LONG      },  // long
-        { { 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, }, TY_LONG      },  // signed long
-        { { 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, }, TY_LONG      },  // long int
-        { { 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, }, TY_LONG      },  // signed long int
-        { { 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_ULONG     },  // unsigned long
-        { { 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, }, TY_ULONG     },  // unsigned long int
-        { { 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, }, TY_LLONG     },  // long long
-        { { 0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, }, TY_LLONG     },  // signed long long
-        { { 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, }, TY_LLONG     },  // long long int
-        { { 0, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0, 0, }, TY_LLONG     },  // signed long long int
-        { { 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, }, TY_ULLONG    },  // unsigned long long
-        { { 0, 0, 0, 1, 2, 0, 0, 0, 1, 0, 0, 0, }, TY_ULLONG    },  // unsigned long long int
-        { { 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, }, TY_FLOAT     },  // float
-        { { 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, }, TY_DOUBLE    },  // double
-        { { 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, }, TY_LDOUBLE   },  // long double
-        { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, }, TY_BOOL      },  // _Bool
+        { { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, &ty_void      },  // void
+        { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, }, &ty_bool      },  // _Bool
+        { { 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, &ty_char      },  // char
+        { { 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, &ty_schar     },  // signed char
+        { { 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, &ty_uchar     },  // unsigned char
+        { { 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, &ty_short     },  // short
+        { { 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, &ty_short     },  // signed short
+        { { 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, }, &ty_short     },  // short int
+        { { 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, }, &ty_short     },  // signed short int
+        { { 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, &ty_ushort    },  // unsigned short
+        { { 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, }, &ty_ushort    },  // unsigned short int
+        { { 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, }, &ty_int       },  // int
+        { { 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, }, &ty_int       },  // signed
+        { { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, }, &ty_int       },  // signed int
+        { { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, }, &ty_uint      },  // unsigned
+        { { 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, }, &ty_uint      },  // unsigned int
+        { { 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, }, &ty_long      },  // long
+        { { 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, }, &ty_long      },  // signed long
+        { { 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, }, &ty_long      },  // long int
+        { { 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, }, &ty_long      },  // signed long int
+        { { 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, }, &ty_ulong     },  // unsigned long
+        { { 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, }, &ty_ulong     },  // unsigned long int
+        { { 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, }, &ty_llong     },  // long long
+        { { 0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, }, &ty_llong     },  // signed long long
+        { { 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, }, &ty_llong     },  // long long int
+        { { 0, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0, 0, }, &ty_llong     },  // signed long long int
+        { { 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, }, &ty_ullong    },  // unsigned long long
+        { { 0, 0, 0, 1, 2, 0, 0, 0, 1, 0, 0, 0, }, &ty_ullong    },  // unsigned long long int
+        { { 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, }, &ty_float     },  // float
+        { { 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, }, &ty_double    },  // double
+        { { 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, }, &ty_ldouble   },  // long double
     };
 
     // Storage class
@@ -770,7 +771,18 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
             if (ty || had_ts) goto err_ts;
             adv(self);
             enum_specifier(self);
-            ty = make_ty(TY_INT);
+            ty = &ty_int;
+            continue;
+
+        case TK_TYPEOF:
+            if (ty || had_ts) goto err_ts;
+            adv(self);
+            want(self, TK_LPAREN);
+            if (is_type_name(self, peek(self, 0)))
+                ty = type_name(self);
+            else
+                ty = expression(self)->ty;
+            want(self, TK_RPAREN);
             continue;
 
         case TK_IDENTIFIER:
@@ -790,7 +802,7 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
             if (had_ts) {
                 for (int i = 0; i < ARRAY_SIZE(ts_map); ++i)
                     if (!memcmp(ts, ts_map[i].ts, sizeof ts_map[i].ts))
-                        return make_ty(ts_map[i].kind);
+                        return ts_map[i].ty;
                 goto err_ts;
             }
 
@@ -1012,6 +1024,7 @@ static bool is_type_name(cc3_t *self, tk_t *tk)
     case TK_STRUCT:
     case TK_UNION:
     case TK_ENUM:
+    case TK_TYPEOF:
         return true;
 
     // Might be a typedef name
@@ -1067,20 +1080,17 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
             sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
             if (sym->kind == SYM_LOCAL) {
-                if (maybe_want(self, TK_AS)) {
-                    // Local initializers are intermixed with code and
-                    // represented in our AST
-                    stmt_t *stmt = make_stmt(STMT_INIT);
-                    stmt->as_init.sym = sym;
-                    stmt->as_init.value = initializer(self, sym->ty);
-                    append_stmt(tail, stmt);
-                }
+                // Locals are intermixed with code and represented in the AST
+                stmt_t *stmt = make_stmt(STMT_DECL);
+                stmt->as_decl.sym = sym;
+                if (maybe_want(self, TK_AS))
+                    stmt->as_decl.init = initializer(self, sym->ty);
                 sema_alloc_local(&self->sema, sym);
+                append_stmt(tail, stmt);
             } else {
-                if (maybe_want(self, TK_AS)) {
-                    // Static initializers get generated in the .data section
+                // Static initializers get generated in the .data section
+                if (maybe_want(self, TK_AS))
                     gen_static(&self->gen, sym, initializer(self, sym->ty));
-                }
             }
         } while (maybe_want(self, TK_COMMA));
         // Declarators must end with ;
@@ -1321,12 +1331,9 @@ static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
     for (param_t *param = ty->function.params; param; param = param->next) {
         if (!param->sym)
             err("Unnamed parameters are not allowed in function definitions");
-
         if (gp < 6) {
+            sema_alloc_local(&self->sema, param->sym);
             ++gp;
-            self->sema.offset = align(self->sema.offset, ty_align(param->ty));
-            param->sym->offset = self->sema.offset;
-            self->sema.offset += ty_size(param->ty);
         }
     }
 
@@ -1334,6 +1341,10 @@ static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
     sema_push(&self->sema, ty->function.scope);
     stmt_t *body = read_block(self);
     sema_exit(&self->sema);
+
+    // Dump function body for debugging
+    printf("Defined functions %s\n", name);
+    print_stmts(body, 1);
 
     // Then we can generate the function, providing the correct
     // frame size from the hack above

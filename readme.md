@@ -7,7 +7,6 @@ Its current state is a result of ~3 weeks of work, the main goal in this period
 was compiling itself, as a result there are many TODOs:
 - Integrated pre-processor
 - Any support for floating point types
-- Type checking other then where strictly necessary for semantics
 - Passing structure and union parameters by value
 - Returning structures and unions by value
 - Designated initializers
@@ -24,6 +23,7 @@ GNU extensions are supported on top of standard:
 - Statement expressions (used by glibc and the compiler)
 - Case ranges in switches (used by the compiler itself)
 - Anonymous structs/unions (used by glibc and the compiler)
+- The __typeof__ operator (used by the compiler)
 - Alternative spelling of inline as __inline (used by glibc)
 
 # Design

@@ -111,6 +111,7 @@ static int check_keyword(const char *spelling)
     if (!strcmp(spelling, "struct"))        return TK_STRUCT;
     if (!strcmp(spelling, "switch"))        return TK_SWITCH;
     if (!strcmp(spelling, "typedef"))       return TK_TYPEDEF;
+    if (!strcmp(spelling, "__typeof__"))    return TK_TYPEOF;
     if (!strcmp(spelling, "union"))         return TK_UNION;
     if (!strcmp(spelling, "unsigned"))      return TK_UNSIGNED;
     if (!strcmp(spelling, "void"))          return TK_VOID;

@@ -65,32 +65,78 @@ static int lit_to_label(gen_t *self, const char *data)
         return entry->as_int = next_label(self);
 }
 
-static const char *ty_data_word(ty_t *ty)
+
+static void gen_const_addr(gen_t *self, expr_t *expr, int offset)
 {
-    switch (ty->kind) {
-    case TY_CHAR:
-    case TY_SCHAR:
-    case TY_UCHAR:
-    case TY_BOOL:
-        return ".byte";
+    switch (expr->kind) {
+    case EXPR_SYM:
+        emit(self, "\t.quad\t%s + %d\n",
+                expr->as_sym->asm_name, offset);
+        break;
+    case EXPR_STR:
+        emit(self, "\t.quad\t.LC%d + %d\n",
+                lit_to_label(self, expr->as_str.data), offset);
+        break;
+    case EXPR_MEMB:
+        gen_const_addr(self, expr->as_memb.aggr, offset + expr->as_memb.offset);
+        break;
+    default:
+        err("Constant lvalue required");
+    }
+}
 
-    case TY_SHORT:
-    case TY_USHORT:
-        return ".word";
+static void gen_const_expr(gen_t *self, expr_t *expr)
+{
+    switch (expr->kind) {
 
-    case TY_INT:
-    case TY_UINT:
-        return ".long";
+    // Numeric constants are self-explanatory
+    case EXPR_CONST:
+        switch (expr->ty->kind) {
+        case TY_BOOL:
+        case TY_CHAR:
+        case TY_SCHAR:
+        case TY_UCHAR:
+            emit(self, "\t.byte\t%lld\n", expr->as_const.value);
+            break;
+        case TY_SHORT:
+        case TY_USHORT:
+            emit(self, "\t.word\t%lld\n", expr->as_const.value);
+            break;
+        case TY_INT:
+        case TY_UINT:
+            emit(self, "\t.long\t%lld\n", expr->as_const.value);
+            break;
+        case TY_LONG:
+        case TY_ULONG:
+        case TY_LLONG:
+        case TY_ULLONG:
+        case TY_POINTER:
+            emit(self, "\t.quad\t%lld\n", expr->as_const.value);
+            break;
+        default:
+            ASSERT_NOT_REACHED();
+        }
+        break;
 
-    case TY_LONG:
-    case TY_ULONG:
-    case TY_LLONG:
-    case TY_ULLONG:
-    case TY_POINTER:
-        return ".quad";
+    // The address of link time known objects can also be used as a constant.
+    case EXPR_REF:
+        gen_const_addr(self, expr->as_unary.arg, 0);
+        break;
+
+    // arrays and function designators get implicitly prefixed with &
+    case EXPR_SYM:
+    case EXPR_STR:
+    case EXPR_MEMB:
+    case EXPR_DREF:
+        if (expr->ty->kind == TY_ARRAY || expr->ty->kind == TY_FUNCTION) {
+            gen_const_addr(self, expr, 0);
+            break;
+        }
+
+        FALLTHROUGH;
 
     default:
-        ASSERT_NOT_REACHED();
+        err("Constant value required");
     }
 }
 
@@ -104,16 +150,16 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
             gen_static_initializer(self, memb->ty, init);
             init = init->next;
             if (memb->next)                             // Middle padding
-                emit(self, "\t.align\t%d\n", ty_align(memb->next->ty));
+                emit(self, "\t.align\t%d\n", memb->next->ty->align);
         }
-        emit(self, "\t.align\t%d\n", ty_align(ty));    // End padding
+        emit(self, "\t.align\t%d\n", ty->align);        // End padding
         break;
 
     case TY_UNION:
         assert(init->kind == INIT_LIST);
         init = init->as_list;
         gen_static_initializer(self, ty->as_aggregate.members->ty, init);
-        emit(self, "\t.align\t%d\n", ty_align(ty));    // End padding
+        emit(self, "\t.align\t%d\n", ty->align);        // End padding
         break;
 
     case TY_ARRAY:
@@ -132,22 +178,7 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
 
     default:
         assert(init->kind == INIT_EXPR);
-        switch (init->as_expr->kind) {
-        case EXPR_SYM:
-            emit(self, "\t%s\t%s\n", ty_data_word(ty),
-                init->as_expr->as_sym->asm_name);
-            break;
-        case EXPR_CONST:
-            emit(self, "\t%s\t%lld\n", ty_data_word(ty),
-                init->as_expr->as_const.value);
-            break;
-        case EXPR_STR:
-            emit(self, "\t%s\t.LC%d\n", ty_data_word(ty),
-                lit_to_label(self, init->as_expr->as_str.data));
-            break;
-        default:
-            err("Constant expression required");
-        }
+        gen_const_expr(self, init->as_expr);
         break;
     }
 }
@@ -161,7 +192,7 @@ void gen_static(gen_t *self, sym_t *sym, init_t *init)
     emit(self,
         "\t.align\t%d\n"
         "%s:\n",
-        ty_align(sym->ty),
+        sym->ty->align,
         sym->asm_name);
 
     gen_static_initializer(self, sym->ty, init);
@@ -228,8 +259,10 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             if (sym->kind == SYM_LOCAL)
                 emit(self, "\tleaq\t%d(%%rbp), %%rax\n",
                             -(self->frame_size - sym->offset));
-            else
+            else if (sym->kind == SYM_STATIC)
                 emit(self, "\tleaq\t%s(%%rip), %%rax\n", sym->asm_name);
+            else
+                emit(self, "\tmovq\t%s@GOTPCREL(%%rip), %%rax\n", sym->asm_name);
         }
         break;
     case EXPR_STR:
@@ -267,21 +300,12 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             "\taddq\t$%d, 8(%%rcx)\n"       // va_list->overflow_arg_area += ty_size
             ".L%d:\n",
             loflo,
-            align(ty_size(expr->ty), 8),
+            align(expr->ty->size, 8),
             lend);
 
         break;
     default:
         err("Expected lvalue expression");
-    }
-}
-
-static void gen_oflo_args(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *args)
-{
-    if (args) {
-        gen_oflo_args(self, jmp_ctx, args->next);
-        gen_value(self, jmp_ctx, args);
-        emit_push(self, "%rax");
     }
 }
 
@@ -348,57 +372,56 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
     case EXPR_CALL:
     {
-        // First we deal with the stack arguments
-        int reg_cnt = 0;
-        expr_t *args = expr->as_binary.rhs;
-        for (; reg_cnt < 6 && args; ++reg_cnt, args = args->next) {
-            gen_value(self, jmp_ctx, args);
-            emit_push(self, "%rax");
-        }
-        while (reg_cnt--)
-            emit_pop(self, qwarg[reg_cnt]);
+        expr_vec_t *args = &expr->as_call.args;
 
-        // Then we must count the stack arguments to maintain alignment
-        int pad_cnt = 0;
-        for (expr_t *tmp = args; tmp; tmp = tmp->next)
-            ++pad_cnt;
-        // We push an extra eightbyte if we would end up with an unaligned stack
-        if ((self->temp_cnt + pad_cnt) & 1) {
+        // Calculate the number of overflow arguments
+        int oflo_cnt;
+        if (args->length > 6)
+            oflo_cnt = args->length - 6;
+        else
+            oflo_cnt = 0;
+
+        // Make sure the stack is always 16 bytes aligned before the call
+        if ((self->temp_cnt + oflo_cnt) & 1) {
             emit_push(self, "%rax");
-            ++pad_cnt;
+            ++oflo_cnt;
         }
-        // Finally we can push the leftover arguments in reverse order
-        gen_oflo_args(self, jmp_ctx, args);
+
+        // Push arguments on the stack in reverse order
+        VEC_FOREACH_REV(args, arg) {
+            gen_value(self, jmp_ctx, *arg);
+            emit_push(self, "%rax");
+        }
+
+        // Pop of the ones that belong in registers
+        for (int i = 0; i < 6 && i < args->length; ++i)
+            emit_pop(self, qwarg[i]);
 
         // Generate call (zero rax for varargs FPU args)
-        expr_t *fn = expr->as_binary.lhs;
-        if (fn->kind == EXPR_SYM && fn->ty->kind == TY_FUNCTION) {
-            // Direct call
+        if (expr->ty->kind == TY_FUNCTION && expr->kind == EXPR_SYM) {
             emit(self,
                 "\txorl\t%%eax, %%eax\n"
-                "\tcall\t%s\n",
-                fn->as_sym->asm_name);
+                "\tcall\t%s@PLT\n", expr->as_sym->asm_name);
         } else {
-            // Indirect call
-            gen_value(self, jmp_ctx, fn);
+            gen_value(self, jmp_ctx, expr->as_call.func);
             emit(self,
                 "\tmovq\t%%rax, %%r10\n"
                 "\txorl\t%%eax, %%eax\n"
                 "\tcall\t*%%r10\n");
         }
 
-        // After the call we can remove all the padding
-        if (pad_cnt) {
-            emit(self, "\taddq\t$%d, %%rsp\n", pad_cnt * 8);
-            self->temp_cnt -= pad_cnt;
+        // After the call remove overflow arguments and any padding
+        if (oflo_cnt) {
+            emit(self, "\taddq\t$%d, %%rsp\n", oflo_cnt * 8);
+            self->temp_cnt -= oflo_cnt;
         }
 
         // Extend smaller then wordsize return value
         switch (expr->ty->kind) {
         case TY_CHAR:
         case TY_SCHAR:  emit(self, "\tmovsbq\t%%al, %%rax\n");     break;
-        case TY_UCHAR:
-        case TY_BOOL:   emit(self, "\tmovzbq\t%%al, %%rax\n");     break;
+        case TY_BOOL:
+        case TY_UCHAR:  emit(self, "\tmovzbq\t%%al, %%rax\n");     break;
         case TY_SHORT:  emit(self, "\tmovswq\t%%ax, %%rax\n");     break;
         case TY_USHORT: emit(self, "\tmovzwq\t%%ax, %%rax\n");     break;
         case TY_INT:    emit(self, "\tmovslq\t%%eax, %%rax\n");    break;
@@ -426,7 +449,6 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         gen_value(self, jmp_ctx, expr->as_unary.arg);
         emit(self, "\tnotq\t%%rax\n");
         break;
-
     case EXPR_MUL:
     case EXPR_DIV:
     case EXPR_MOD:
@@ -493,10 +515,10 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         // of deciding the width based on the destination type. But for
         // now this should fix NULL being truncated to 32-bits
         switch (expr->as_binary.lhs->ty->kind) {
+        case TY_BOOL:
         case TY_CHAR:
         case TY_SCHAR:
         case TY_UCHAR:
-        case TY_BOOL:
             emit(self, "\tmovb\t%%al, (%%rcx)\n");
             break;
         case TY_SHORT:
@@ -521,7 +543,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
                 "\tmovq\t%%rax, %%rsi\n"
                 "\tmovabs\t$%d, %%rdx\n"
                 "\tcall\tmemcpy\n",
-                ty_size(expr->ty));
+                expr->ty->size);
             break;
         default:
             ASSERT_NOT_REACHED();
@@ -707,7 +729,7 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
             for (int i = 0; i < ty->array.cnt; ++i) {
                 gen_initializer(self, jmp_ctx, ty->array.elem_ty, offset, init);
                 init = init->next;
-                offset += ty_size(ty->array.elem_ty);
+                offset += ty->array.elem_ty->size;
             }
         }
         break;
@@ -898,8 +920,10 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
                 gen_value(self, jmp_ctx, head->as_return.value);
             emit_jump(self, "jmp", jmp_ctx->return_label);
             break;
-        case STMT_INIT:
-            gen_initializer(self, jmp_ctx, head->as_init.sym->ty, head->as_init.sym->offset, head->as_init.value);
+        case STMT_DECL:
+            if (head->as_decl.init)
+                gen_initializer(self, jmp_ctx, head->as_decl.sym->ty,
+                        head->as_decl.sym->offset, head->as_decl.init);
             break;
         case STMT_EVAL:
             gen_value(self, jmp_ctx, head->as_eval.value);
@@ -973,10 +997,10 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
         if (gp < 6) {
             gen_param_spill(self, param->sym->ty, param->sym->offset, gp++);
         } else {
-            int palign = ty_align(param->ty);
+            int palign = param->ty->align;
             oflo = align(oflo, palign < 8 ? 8 : palign);
             param->sym->offset = oflo;
-            oflo += ty_size(param->ty);
+            oflo += param->ty->size;
         }
 
     // Starting values for va_lists

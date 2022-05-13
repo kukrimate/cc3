@@ -355,3 +355,7 @@ bool map_delete(map_t *self, const char *key)
         return false;
     }
 }
+
+// Code for expanded generics goes here
+
+VEC_GEN(expr_vec, expr_t *)
