@@ -180,6 +180,21 @@ static void int_suffix(lexer_t *self, tk_t *tk)
         ;
 }
 
+static bool iswhite(int ch)
+{
+    switch (ch) {
+    case ' ':
+    case '\f':
+    case '\n':
+    case '\r':
+    case '\t':
+    case '\v':
+        return true;
+    default:
+        return false;
+    }
+}
+
 int lex_next(lexer_t *self, tk_t *tk)
 {
     int ch;
@@ -281,12 +296,18 @@ retry:
     // String literal
     case '\"':
         string_clear(&tk->str);
-        for (;;)
+        again_str: for (;;)
             switch ((ch = input(self, tk))) {
             case EOF:
             case '\n':
                 return (tk->type = TK_ERROR);
             case '\"':
+                // Skip whitespace after the literal
+                while (iswhite(peek(self, 0)))
+                    eat(self, tk);
+                // Check if there is another one to concatenate it with
+                if (match(self, tk, '\"'))
+                    goto again_str;
                 return (tk->type = TK_STR_LIT);
             case '\\':
                 ch = unescape(self, tk);

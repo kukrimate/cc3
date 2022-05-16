@@ -359,3 +359,4 @@ bool map_delete(map_t *self, const char *key)
 // Code for expanded generics goes here
 
 VEC_GEN(expr_vec, expr_t *)
+VEC_GEN(init_vec, init_t)

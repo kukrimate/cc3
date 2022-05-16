@@ -65,7 +65,6 @@ static int lit_to_label(gen_t *self, const char *data)
         return entry->as_int = next_label(self);
 }
 
-
 static void gen_const_addr(gen_t *self, expr_t *expr, int offset)
 {
     switch (expr->kind) {
@@ -145,35 +144,31 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
     switch (ty->kind) {
     case TY_STRUCT:
         assert(init->kind == INIT_LIST);
-        init = init->as_list;
+
+        int i = 0;
         for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
-            gen_static_initializer(self, memb->ty, init);
-            init = init->next;
+            gen_static_initializer(self, memb->ty, VEC_AT(&init->as_list, i++));
             if (memb->next)                             // Middle padding
                 emit(self, "\t.align\t%d\n", memb->next->ty->align);
         }
+
         emit(self, "\t.align\t%d\n", ty->align);        // End padding
         break;
 
     case TY_UNION:
         assert(init->kind == INIT_LIST);
-        init = init->as_list;
-        gen_static_initializer(self, ty->as_aggregate.members->ty, init);
+        gen_static_initializer(self,
+            ty->as_aggregate.members->ty,
+            VEC_AT(&init->as_list, 0));
         emit(self, "\t.align\t%d\n", ty->align);        // End padding
         break;
 
     case TY_ARRAY:
-        if (init->kind == INIT_EXPR) {                  // String literal
-            char *data = init->as_expr->as_str.data;
-            for (int i = 0; i < ty->array.cnt; ++i)
-                emit(self, "\t.byte\t0x%02x\n", data[i]);
-        } else {                                        // Initializer list
-            init = init->as_list;
-            for (int i = 0; i < ty->array.cnt; ++i) {
-                gen_static_initializer(self, ty->array.elem_ty, init);
-                init = init->next;
-            }
-        }
+        assert(init->kind == INIT_LIST);
+        for (int i = 0; i < ty->array.cnt; ++i)
+            gen_static_initializer(self,
+                ty->array.elem_ty,
+                VEC_AT(&init->as_list, i));
         break;
 
     default:
@@ -706,31 +701,24 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
     switch (ty->kind) {
     case TY_STRUCT:
         assert(init->kind == INIT_LIST);
-        init = init->as_list;
+        int i = 0;
         for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
-            gen_initializer(self, jmp_ctx, memb->ty, offset + memb->offset, init);
-            init = init->next;
+            gen_initializer(self, jmp_ctx, memb->ty,
+                offset + memb->offset, VEC_AT(&init->as_list, i++));
         }
         break;
     case TY_UNION:
         assert(init->kind == INIT_LIST);
-        init = init->as_list;
         gen_initializer(self, jmp_ctx, ty->as_aggregate.members->ty,
-            offset + ty->as_aggregate.members->offset, init);
+            offset + ty->as_aggregate.members->offset,
+            VEC_AT(&init->as_list, 0));
         break;
     case TY_ARRAY:
-        if (init->kind == INIT_EXPR) {                  // String literal
-            char *data = init->as_expr->as_str.data;
-            for (int i = 0; i < ty->array.cnt; ++i, ++offset)
-                emit(self, "\tmovb\t$0x%02x, %d(%%rbp)\n",
-                    data[i], -(self->frame_size - offset));
-        } else {                                        // Initializer list
-            init = init->as_list;
-            for (int i = 0; i < ty->array.cnt; ++i) {
-                gen_initializer(self, jmp_ctx, ty->array.elem_ty, offset, init);
-                init = init->next;
-                offset += ty->array.elem_ty->size;
-            }
+        assert(init->kind == INIT_LIST);
+        for (int i = 0; i < ty->array.cnt; ++i) {
+            gen_initializer(self, jmp_ctx, ty->array.elem_ty,
+                offset, VEC_AT(&init->as_list, i));
+            offset += ty->array.elem_ty->size;
         }
         break;
     default:
@@ -921,9 +909,8 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             emit_jump(self, "jmp", jmp_ctx->return_label);
             break;
         case STMT_DECL:
-            if (head->as_decl.init)
-                gen_initializer(self, jmp_ctx, head->as_decl.sym->ty,
-                        head->as_decl.sym->offset, head->as_decl.init);
+            gen_initializer(self, jmp_ctx, head->as_decl.sym->ty,
+                head->as_decl.sym->offset, &head->as_decl.init);
             break;
         case STMT_EVAL:
             gen_value(self, jmp_ctx, head->as_eval.value);

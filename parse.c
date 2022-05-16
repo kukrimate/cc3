@@ -184,16 +184,8 @@ expr_t *primary_expression(cc3_t *self)
         expr = make_const_expr(&ty_int, tk->val);
         break;
     case TK_STR_LIT:
-        {
-            // NOTE: this is a little hacky
-            string_t s;
-            string_init(&s);
-            string_printf(&s, "%s", tk->str.data);
-            while ((tk = maybe_want(self, TK_STR_LIT)))
-                string_printf(&s, "%s", tk->str.data);
-            expr = make_str_expr(s.data);
-            break;
-        }
+        expr = make_str_expr(strdup(tk->str.data));
+        break;
     case TK_LPAREN:
         if (maybe_want(self, TK_LCURLY)) {  // [GNU]: statement expressions
             sema_enter(&self->sema);
@@ -485,45 +477,188 @@ int constant_expression(cc3_t *self)
 
 /** Initializers **/
 
-#if 0
-static void designation(cc3_t *self)
+static void scalar_initialzier(cc3_t *self, init_t *out, ty_t *ty)
 {
-    bool match = false;
+    // If we reach a member of an aggregate without an initializer, we need to
+    // zero initialize it. We make that explicit to simplify code generation.
+    if (peek(self, 0)->type == TK_RCURLY)
+        return make_init_expr(out, ty, make_const_expr(&ty_int, 0));
 
-    for (;;)
-        if (maybe_want(self, TK_LSQ)) {
-            constant_expression(self);
-            want(self, TK_RSQ);
-            match = true;
-        } else if (maybe_want(self, TK_DOT)) {
-            want(self, TK_IDENTIFIER);
-            match = true;
-        } else {
-            goto end;
-        }
-end:
-    if (match)
-        want(self, TK_AS);
-}
-#endif
-
-static init_t *initializer_r(cc3_t *self)
-{
     if (maybe_want(self, TK_LCURLY)) {
-        init_t *head, **tail = &head;
-        do {
-            *tail = initializer_r(self);
-            tail = &(*tail)->next;
-        } while (!end_comma_separated(self));
-        return make_init_list(head);
+        // Recurse if the initializer is enclosed in braces
+        scalar_initialzier(self, out, ty);
+        want(self, TK_RCURLY);
     } else {
-        return make_init_expr(assignment_expression(self));
+        // Otherwise there must be an expression here
+        make_init_expr(out, ty, assignment_expression(self));
     }
 }
 
-static init_t *initializer(cc3_t *self, ty_t *ty)
+static bool string_array_initializer(cc3_t *self, init_t *out, ty_t *ty)
 {
-    return bind_init(ty, initializer_r(self));
+    // Bail on non-character arrays
+    assert(ty->kind == TY_ARRAY);
+    if (!(ty->array.elem_ty->kind & (TY_CHAR | TY_SCHAR | TY_UCHAR)))
+        return false;
+
+    // Bail if the next token is not a string literal
+    // FIXME: the string literal might be enclosed in braces
+    tk_t *tk;
+    if (!(tk = maybe_want(self, TK_STR_LIT)))
+        return false;
+
+    // The string literal might complete the array's type
+    if (ty->array.cnt == -1) {
+        int cnt = tk->str.length + 1;
+        ty->align = ty->array.elem_ty->align;
+        ty->size = ty->array.elem_ty->size * cnt;
+        ty->array.cnt = cnt;
+    }
+
+    // Create an initializer list from the string literal
+    init_vec_t list;
+    init_vec_init(&list);
+
+    for (int i = 0; i < ty->array.cnt; ++i)
+        if (i < tk->str.length)
+            make_init_expr(init_vec_push(&list), ty->array.elem_ty,
+                make_const_expr(&ty_char, tk->str.data[i]));
+        else
+            make_init_expr(init_vec_push(&list), ty->array.elem_ty,
+                make_const_expr(&ty_char, 0));
+
+    make_init_list(out, &list);
+    return true;
+}
+
+static void initializer_r(cc3_t *self, init_t *out, ty_t *ty, bool outer);
+
+static void struct_initializer(cc3_t *self, init_t *out, ty_t *ty)
+{
+    init_vec_t list;
+    init_vec_init(&list);
+
+    // Bind an initializer to each member of the struct
+    for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next)
+        initializer_r(self, init_vec_push(&list), memb->ty, false);
+
+    // Return the new initializer list we've built
+    make_init_list(out, &list);
+}
+
+static void union_initializer(cc3_t *self, init_t *out, ty_t *ty)
+{
+    // Like the struct initializer above, however only the first member
+    // can be initialized of an union
+
+    init_vec_t list;
+    init_vec_init(&list);
+    initializer_r(self, init_vec_push(&list), ty->as_aggregate.members->ty, false);
+
+    make_init_list(out, &list);
+}
+
+static void array_initializer(cc3_t *self, init_t *out, ty_t *ty)
+{
+    init_vec_t list;
+    init_vec_init(&list);
+
+    if (ty->array.cnt == -1) {
+        // Bind as many initializers as we can, and count them
+        int cnt;
+        for (cnt = 0; peek(self, 0)->type != TK_RCURLY; ++cnt)
+            initializer_r(self, init_vec_push(&list), ty->array.elem_ty, false);
+
+        // Then complete the array type with the number of entries
+        ty->align = ty->array.elem_ty->align;
+        ty->size = ty->array.elem_ty->size * cnt;
+        ty->array.cnt = cnt;
+    } else {
+        // Bind an initializer to each array element
+        for (int i = 0; i < ty->array.cnt; ++i)
+            initializer_r(self, init_vec_push(&list), ty->array.elem_ty, false);
+    }
+
+    // Return the new initializer list we've built
+    make_init_list(out, &list);
+}
+
+static void initializer_r(cc3_t *self, init_t *out, ty_t *ty, bool outer)
+{
+    switch (ty->kind) {
+    // Struct:
+    // - a brace enclosed initializer list
+    // - consume elements from the outer initializer list
+    case TY_STRUCT:
+        if (maybe_want(self, TK_LCURLY)) {
+            struct_initializer(self, out, ty);
+            want(self, TK_RCURLY);
+            break;
+        }
+
+        // Otherwise consume elements from the outer initializer list
+        if (outer)
+            err("Invalid initializer for struct %T", ty);
+
+        struct_initializer(self, out, ty);
+        break;
+
+    // Union:
+    // - a brace enclosed initializer list
+    // - consume elements from the outer initializer list
+    case TY_UNION:
+        if (maybe_want(self, TK_LCURLY)) {
+            union_initializer(self, out, ty);
+            want(self, TK_RCURLY);
+            break;
+        }
+
+        // Otherwise consume elements from the outer initializer list
+        if (outer)
+            err("Invalid initializer for union %T", ty);
+
+        union_initializer(self, out, ty);
+        break;
+
+    // Array:
+    // - for char arrays, a string literal, optionally in braces
+    // - a brace enclosed initializer list
+    // - consume elements from the outer initializer list
+    case TY_ARRAY:
+        if (ty->array.cnt == -1 && !outer)
+            err("Only the outermost array type is allowed to be incomplete");
+
+        // First see if we found a string literal initializer
+        if (string_array_initializer(self, out, ty))
+            break;
+
+        if (maybe_want(self, TK_LCURLY)) {
+            array_initializer(self, out, ty);
+            want(self, TK_RCURLY);
+            break;
+        }
+
+        // Otherwise consume elements from the outer initializer list
+        if (outer)
+            err("Invalid initializer for array %T", ty);
+
+        array_initializer(self, out, ty);
+        break;
+
+    // Scalar:
+    // - an expression, optionally in braces
+    default:
+        scalar_initialzier(self, out, ty);
+    }
+
+    // Initializer list members might be followed by a comma
+    if (!outer)
+        maybe_want(self, TK_COMMA);
+}
+
+static void initializer(cc3_t *self, init_t *out, ty_t *ty)
+{
+    initializer_r(self, out, ty, true);
 }
 
 /** Declarations **/
@@ -1080,19 +1215,25 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
             sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
             if (sym->kind == SYM_LOCAL) {
-                // Locals are intermixed with code and represented in the AST
-                stmt_t *stmt = make_stmt(STMT_DECL);
-                stmt->as_decl.sym = sym;
-                if (maybe_want(self, TK_AS))
-                    stmt->as_decl.init = initializer(self, sym->ty);
+                if (maybe_want(self, TK_AS)) {
+                    // Locals are intermixed with code and represented in the AST
+                    stmt_t *stmt = make_stmt(STMT_DECL);
+                    stmt->as_decl.sym = sym;
+                    initializer(self, &stmt->as_decl.init, sym->ty);
+                    append_stmt(tail, stmt);
+                }
+
                 sema_alloc_local(&self->sema, sym);
-                append_stmt(tail, stmt);
             } else {
-                // Static initializers get generated in the .data section
-                if (maybe_want(self, TK_AS))
-                    gen_static(&self->gen, sym, initializer(self, sym->ty));
+                if (maybe_want(self, TK_AS)) {
+                    // Static initializers get generated in the .data section
+                    init_t init;
+                    initializer(self, &init, sym->ty);
+                    gen_static(&self->gen, sym, &init);
+                }
             }
         } while (maybe_want(self, TK_COMMA));
+
         // Declarators must end with ;
         want(self, TK_SEMICOLON);
     }
@@ -1355,8 +1496,11 @@ static void external_declaration(cc3_t *self, int sc, ty_t *ty, char *name)
 {
     sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
-    if (maybe_want(self, TK_AS))
-        gen_static(&self->gen, sym, initializer(self, sym->ty));
+    if (maybe_want(self, TK_AS)) {
+        init_t init;
+        initializer(self, &init, sym->ty);
+        gen_static(&self->gen, sym, &init);
+    }
 }
 
 static void translation_unit(cc3_t *self)

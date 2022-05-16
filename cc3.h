@@ -602,20 +602,19 @@ enum {
 
 typedef struct init init_t;
 
-struct init {
-    init_t *next;
+VEC_DEF(init_vec, init_t)
 
+struct init {
     int kind;
 
     union {
         expr_t *as_expr;
-        init_t *as_list;
+        init_vec_t as_list;
     };
 };
 
-init_t *make_init_expr(expr_t *expr);
-init_t *make_init_list(init_t *list);
-init_t *bind_init(ty_t *ty, init_t *init);
+void make_init_expr(init_t *out, ty_t *dest_ty, expr_t *expr);
+void make_init_list(init_t *out, init_vec_t *list);
 
 /** Statements **/
 
@@ -672,7 +671,7 @@ struct stmt {
 
         struct {
             sym_t *sym;
-            init_t *init;
+            init_t init;
         } as_decl;
     };
 };

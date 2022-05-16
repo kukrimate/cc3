@@ -23,8 +23,8 @@ GNU extensions are supported on top of standard:
 - Statement expressions (used by glibc and the compiler)
 - Case ranges in switches (used by the compiler itself)
 - Anonymous structs/unions (used by glibc and the compiler)
-- The __typeof__ operator (used by the compiler)
-- Alternative spelling of inline as __inline (used by glibc)
+- The `__typeof__` operator (used by the compiler)
+- Alternative spelling of inline as `__inline` (used by glibc)
 
 # Design
 
@@ -43,17 +43,19 @@ The compiler itself has 4 main modules:
 
 - parse.c: Recursive-descent parser (hand written)
 
-    The parser is a relatively clean, textbook, predictive recursive descent
-    parser. It uses an internal FIFO to allow for two tokens of lookahead.
-    If we ignore its entanglement with context information required to resolve
-    typedef-name ambiguities, it is essentially an LL(2) parser.
+    The parser is a relatively clean, predictive recursive descent parser.
+    It uses an internal FIFO to allow for two tokens of lookahead. At its core
+    it's an LL(2) parser. However it is entangled with context information
+    required to resolve typedef-name ambiguities, and type information to choose
+    productions during initializer parsing.
 
-    Expressions and statements produce an AST. However scoping is done by the
-    semantic analyzer, thus nested block statements are not represented in it.
+    Expressions, initializers and statements produce an AST. However scoping is
+    done by the semantic analyzer, thus nested block statements are not
+    represented in it.
 
     Declarations need semantic information to disambiguate typedef names from
-    idenitifiers. Additionally the syntax of C declarators is quite challanges
-    to parse in one pass, thus a temporary linked-list representing a declarator
+    idenitifiers. Additionally the syntax of C declarators is challanging to
+    parse in one pass, thus a temporary linked-list representing a declarator
     is produced. Then it's walked in a second pass to construct the final type
     of a declaration.
 

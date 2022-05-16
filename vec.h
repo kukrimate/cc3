@@ -50,9 +50,12 @@ memb_ty *name ## _push(name ## _t *self)                                       \
     return self->data + self->length - 1;                                      \
 }                                                                              \
 
-
 #define VEC_AT(vec, i)                                                         \
-    ({ assert(i < (vec)->length); (vec)->data + i; })                          \
+    ({                                                                         \
+        __typeof__ (i) tmp = i;                                                \
+        assert(tmp < (vec)->length);                                           \
+        (vec)->data + tmp;                                                     \
+    })
 
 #define VEC_FOREACH(vec, cur)                                                  \
     for (__typeof__ ((vec)->data) cur = (vec)->data,                           \
