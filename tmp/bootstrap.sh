@@ -10,10 +10,8 @@ files="cc3 gen sema parse lex debug util"
 
 for file in $files
 do
-    echo "Preprocessing $file"
-    cpp -U__GNUC__ -P $file.c > tmp/$file.i
     echo "Compiling $file (stage 0)"
-    ./cc3 -c -o tmp/$file.o tmp/$file.i
+    ./cc3 -c -o tmp/$file.o $file.c
 done
 
 echo "Linking (stage 0)"
@@ -28,12 +26,9 @@ do
     for file in $files
     do
         echo "Compiling $file (stage $N)"
-        ./tmp/cc3 -c -o tmp/$file.o tmp/$file.i
+        ./tmp/cc3 -c -o tmp/$file.o $file.c
     done
 
     echo "Linking (stage $N)"
     cc -o tmp/cc3 tmp/*.o
 done
-
-# Cleanup
-rm tmp/*.i tmp/*.o

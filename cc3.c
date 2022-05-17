@@ -2,7 +2,38 @@
 
 #include "cc3.h"
 
-static int run_process(char **args)
+static int run_cpp(char *in_path)
+{
+    // Create pipe
+    int pipefd[2];
+    if (pipe(pipefd) < 0)
+        return -1;
+
+    // Fork child process
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid) {
+        // Parent process
+        close(pipefd[1]);
+        return pipefd[0];
+    } else {
+        // Child process
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]);
+        close(pipefd[1]);
+
+        char *args[] = { "cpp", "-U__GNUC__", "-P", in_path, NULL };
+        execvp(args[0], args);
+        exit(errno);
+    }
+}
+
+static int run_command(char **args)
 {
     pid_t pid = fork();
     if (pid < 0)                            // Failed to fork
@@ -21,6 +52,16 @@ static int run_process(char **args)
     exit(errno);                            // Exit if execvp fails
 }
 
+static int do_compile(int in_fd, char *out_path)
+{
+    int out_fd = open(out_path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
+    if (out_fd < 0)
+        return -1;
+    cc3_compile(in_fd, out_fd);
+    close(out_fd);
+    return 0;
+}
+
 static int do_assemble(int in_fd, char *out_path)
 {
     char asm_path[] = "/tmp/asmXXXXXX";
@@ -34,7 +75,7 @@ static int do_assemble(int in_fd, char *out_path)
 
     // Assemble
     char *args[] = { "as", "-o", out_path, asm_path, NULL };
-    int err = run_process(args);
+    int err = run_command(args);
 
     close(asm_fd);
     unlink(asm_path);
@@ -55,7 +96,7 @@ static int do_link(int in_fd, char *out_path)
     // Run linker
     if (err == 0) {
         char *args[] = { "cc", "-o", out_path, obj_path, NULL };
-        err = run_process(args);
+        err = run_command(args);
     }
 
     close(obj_fd);
@@ -68,18 +109,22 @@ int main(int argc, char **argv)
     int opt;
     bool opt_S = false;
     bool opt_c = false;
-    char *output_path = NULL;
+    bool opt_r = false;
+    char *out_path = NULL;
 
-    while ((opt = getopt(argc, argv, "Sco:h")) != -1)
+    while ((opt = getopt(argc, argv, "Scro:h")) != -1)
         switch (opt) {
         case 'S':   // Generate assembly
             opt_S = true;
             break;
-        case 'c':   // Generate assembly and assemble
+        case 'c':   // Generate object file
             opt_c = true;
             break;
+        case 'r':   // Read raw input
+            opt_r = true;
+            break;
         case 'o':   // Output file
-            output_path = optarg;
+            out_path = optarg;
             break;
         case 'h':
         default:
@@ -88,42 +133,40 @@ int main(int argc, char **argv)
             return 1;
         }
 
-    if (!output_path)
+    if (!out_path)
         goto usage;
 
     if (optind >= argc)
         goto usage;
 
-    int in_fd = open(argv[optind], O_RDONLY);
+    // Run pre-processor or read raw input
 
-    if (in_fd < 0) {
-        perror(argv[optind]);
-        return 1;
-    }
+    int in_fd;
 
-    // Setup context
+    if (opt_r)
+        in_fd = open(argv[optind], O_RDONLY);
+    else
+        in_fd = run_cpp(argv[optind]);
 
+    if (in_fd < 0)
+        goto err;
 
     // Perform the actions requested by the user
+    
     if (opt_S) {
-        int out_fd = open(output_path, O_CREAT | O_WRONLY, 0666);
-        if (out_fd < 0)
+        if (do_compile(in_fd, out_path) < 0)
             goto err;
-        cc3_compile(in_fd, out_fd);
-        close(out_fd);
     } else if (opt_c) {
-        if (do_assemble(in_fd, output_path) < 0)
+        if (do_assemble(in_fd, out_path) < 0)
             goto err;
     } else {
-        if (do_link(in_fd, output_path) < 0)
+        if (do_link(in_fd, out_path) < 0)
             goto err;
     }
 
-    close(in_fd);
     return 0;
 
 err:
     perror("cc3");
-    close(in_fd);
     return 1;
 }
