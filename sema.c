@@ -347,17 +347,6 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     return sym;
 }
 
-void sema_alloc_local(sema_t *self, sym_t *sym)
-{
-    assert(sym->kind == SYM_LOCAL);
-
-    // First align the stack
-    self->offset = align(self->offset, sym->ty->align);
-    // Then we can allocate space for the variable
-    sym->offset = self->offset;
-    self->offset += sym->ty->size;
-}
-
 sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val)
 {
     // Look for previous declaration in the current scope

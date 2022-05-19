@@ -9,26 +9,26 @@ static const char *warg[] = { "%di", "%si", "%dx", "%cx", "%r8w", "%r9w" };
 static const char *dwarg[] = { "%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d" };
 static const char *qwarg[] = { "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9" };
 
+#define VA_REGSAVE_SIZE 48
+
 /** Context for jumps **/
 
-typedef struct case_label case_label_t;
-
-struct case_label {
-    case_label_t *next;
+typedef struct {
     int label;
     int begin;
     int end;
-};
+} case_t;
 
-typedef struct jmp_ctx jmp_ctx_t;
+VEC_DEF(case_vec, case_t)
+VEC_GEN(case_vec, case_t)
 
-struct jmp_ctx {
+typedef struct {
     int return_label;
     int continue_label;
     int break_label;
-    case_label_t **case_tail;
+    case_vec_t *cases;
     int default_label;
-};
+} jmp_ctx_t;
 
 /** Code generator **/
 
@@ -144,7 +144,6 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
     switch (ty->kind) {
     case TY_STRUCT:
         assert(init->kind == INIT_LIST);
-
         int i = 0;
         for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
             gen_static_initializer(self, memb->ty, VEC_AT(&init->as_list, i++));
@@ -195,14 +194,17 @@ void gen_static(gen_t *self, sym_t *sym, init_t *init)
 
 static int next_case_label(gen_t *self, jmp_ctx_t *jmp_ctx, int begin, int end)
 {
-    case_label_t *case_label = calloc(1, sizeof *case_label);
-    if (!case_label) abort();
-    case_label->label = next_label(self);
-    case_label->begin = begin;
-    case_label->end = end;
-    *jmp_ctx->case_tail = case_label;
-    jmp_ctx->case_tail = &case_label->next;
-    return case_label->label;
+    // Verify that it doesn't overlap with any previous cases
+    VEC_FOREACH(jmp_ctx->cases, cur)
+        if ((cur->begin >= begin && cur->begin <= end)
+                || (cur->end >= begin && cur->end <= end))
+            err("Overlapping case statements");
+
+    // If there was no overlap we can add a new case label
+    case_t *cur = case_vec_push(jmp_ctx->cases);
+    cur->begin = begin;
+    cur->end = end;
+    return cur->label = next_label(self);
 }
 
 static int map_goto(gen_t *self, const char *name)
@@ -239,6 +241,15 @@ static void emit_pop(gen_t *self, const char *reg)
     emit(self, "\tpop\t%s\n", reg);
 }
 
+static expr_t *match_unary(expr_t *expr, int kind1, int kind2)
+{
+    if (expr->kind != kind1)
+        return NULL;
+    if ((expr = expr->as_unary.arg)->kind != kind2)
+        return NULL;
+    return expr;
+}
+
 static void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label);
@@ -252,16 +263,13 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             sym_t *sym = expr->as_sym;
 
             if (sym->kind == SYM_LOCAL)
-                emit(self, "\tleaq\t%d(%%rbp), %%rax\n",
-                            -(self->frame_size - sym->offset));
-            else if (sym->kind == SYM_STATIC)
-                emit(self, "\tleaq\t%s(%%rip), %%rax\n", sym->asm_name);
+                emit(self, "\tleaq\t%d(%%rbp), %%rax\n", sym->offset);
             else
                 emit(self, "\tmovq\t%s@GOTPCREL(%%rip), %%rax\n", sym->asm_name);
         }
         break;
     case EXPR_STR:
-        emit(self, "\tleaq\t.LC%d(%%rip), %%rax\n",
+        emit(self, "\tmovq\t.LC%d@GOTPCREL(%%rip), %%rax\n",
                     lit_to_label(self, expr->as_str.data));
         break;
     case EXPR_MEMB:
@@ -301,6 +309,53 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         break;
     default:
         err("Expected lvalue expression");
+    }
+}
+
+static void gen_call(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *func, expr_vec_t *args)
+{
+    // Calculate the number of overflow arguments
+    int oflo_cnt;
+    if (args->length > 6)
+        oflo_cnt = args->length - 6;
+    else
+        oflo_cnt = 0;
+
+    // Make sure the stack is always 16 bytes aligned before the call
+    if ((self->temp_cnt + oflo_cnt) & 1) {
+        emit_push(self, "%rax");
+        ++oflo_cnt;
+    }
+
+    // Push arguments on the stack in reverse order
+    VEC_FOREACH_REV(args, arg) {
+        gen_value(self, jmp_ctx, *arg);
+        emit_push(self, "%rax");
+    }
+    // Pop off the ones that belong in registers
+    for (int i = 0; i < 6 && i < args->length; ++i)
+        emit_pop(self, qwarg[i]);
+
+    // Generate call (zero rax for varargs FPU args)
+    ty_t *func_ty = func->ty->pointer.base_ty;
+    expr_t *sym = match_unary(func, EXPR_REF, EXPR_SYM);
+
+    if (sym) {
+        if (func_ty->function.var)
+            emit(self, "\txorl\t%%eax, %%eax\n");
+        emit(self, "\tcall\t%s@PLT\n", sym->as_sym->asm_name);
+    } else {
+        gen_value(self, jmp_ctx, func);
+        emit(self, "\tmovq\t%%rax, %%r10\n");
+        if (func_ty->function.var)
+            emit(self, "\txorl\t%%eax, %%eax\n");
+        emit(self, "\tcall\t*%%r10\n");
+    }
+
+    // After the call remove overflow arguments and any padding
+    if (oflo_cnt) {
+        emit(self, "\taddq\t$%d, %%rsp\n", oflo_cnt * 8);
+        self->temp_cnt -= oflo_cnt;
     }
 }
 
@@ -366,51 +421,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         break;
 
     case EXPR_CALL:
-    {
-        expr_vec_t *args = &expr->as_call.args;
-
-        // Calculate the number of overflow arguments
-        int oflo_cnt;
-        if (args->length > 6)
-            oflo_cnt = args->length - 6;
-        else
-            oflo_cnt = 0;
-
-        // Make sure the stack is always 16 bytes aligned before the call
-        if ((self->temp_cnt + oflo_cnt) & 1) {
-            emit_push(self, "%rax");
-            ++oflo_cnt;
-        }
-
-        // Push arguments on the stack in reverse order
-        VEC_FOREACH_REV(args, arg) {
-            gen_value(self, jmp_ctx, *arg);
-            emit_push(self, "%rax");
-        }
-
-        // Pop of the ones that belong in registers
-        for (int i = 0; i < 6 && i < args->length; ++i)
-            emit_pop(self, qwarg[i]);
-
-        // Generate call (zero rax for varargs FPU args)
-        if (expr->ty->kind == TY_FUNCTION && expr->kind == EXPR_SYM) {
-            emit(self,
-                "\txorl\t%%eax, %%eax\n"
-                "\tcall\t%s@PLT\n", expr->as_sym->asm_name);
-        } else {
-            gen_value(self, jmp_ctx, expr->as_call.func);
-            emit(self,
-                "\tmovq\t%%rax, %%r10\n"
-                "\txorl\t%%eax, %%eax\n"
-                "\tcall\t*%%r10\n");
-        }
-
-        // After the call remove overflow arguments and any padding
-        if (oflo_cnt) {
-            emit(self, "\taddq\t$%d, %%rsp\n", oflo_cnt * 8);
-            self->temp_cnt -= oflo_cnt;
-        }
-
+        gen_call(self, jmp_ctx, expr->as_call.func, &expr->as_call.args);
         // Extend smaller then wordsize return value
         switch (expr->ty->kind) {
         case TY_CHAR:
@@ -423,9 +434,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         // NOTE: 32-bit operand is zero extended
         case TY_UINT:   emit(self, "\tmovl\t%%eax, %%eax\n");      break;
         }
-
         break;
-    }
 
     case EXPR_REF:
         gen_addr(self, jmp_ctx, expr->as_unary.arg);
@@ -444,6 +453,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         gen_value(self, jmp_ctx, expr->as_unary.arg);
         emit(self, "\tnotq\t%%rax\n");
         break;
+
     case EXPR_MUL:
     case EXPR_DIV:
     case EXPR_MOD:
@@ -454,11 +464,10 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     case EXPR_AND:
     case EXPR_XOR:
     case EXPR_OR:
-        gen_value(self, jmp_ctx, expr->as_binary.lhs);
-        emit_push(self, "%rax");
         gen_value(self, jmp_ctx, expr->as_binary.rhs);
-        emit(self, "\tmovq\t%%rax, %%rcx\n");
-        emit_pop(self, "%rax");
+        emit_push(self, "%rax");
+        gen_value(self, jmp_ctx, expr->as_binary.lhs);
+        emit_pop(self, "%rcx");
 
         switch (expr->kind) {
         case EXPR_DIV:  emit(self, "\txorl\t%%edx, %%edx\n\tdivq\t%%rcx\n"); break;
@@ -500,16 +509,12 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
     case EXPR_AS:
     {
-        gen_value(self, jmp_ctx, expr->as_binary.rhs);
-        emit_push(self, "%rax");
         gen_addr(self, jmp_ctx, expr->as_binary.lhs);
-        emit(self, "\tmovq\t%%rax, %%rcx\n");
-        emit_pop(self, "%rax");
+        emit_push(self, "%rax");
+        gen_value(self, jmp_ctx, expr->as_binary.rhs);
+        emit_pop(self, "%rcx");
 
-        // NOTE: do proper type conversions instead of this hackery
-        // of deciding the width based on the destination type. But for
-        // now this should fix NULL being truncated to 32-bits
-        switch (expr->as_binary.lhs->ty->kind) {
+        switch (expr->ty->kind) {
         case TY_BOOL:
         case TY_CHAR:
         case TY_SCHAR:
@@ -536,7 +541,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
             emit(self,
                 "\tmovq\t%%rcx, %%rdi\n"
                 "\tmovq\t%%rax, %%rsi\n"
-                "\tmovabs\t$%d, %%rdx\n"
+                "\tmovq\t$%d, %%rdx\n"
                 "\tcall\tmemcpy\n",
                 expr->ty->size);
             break;
@@ -586,7 +591,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         emit(self,
             "\tleaq\t%d(%%rbp), %%rcx\n"
             "\tmovq\t%%rcx, 16(%%rax)\n",
-            -self->frame_size);                 // reg_save_area
+            -VA_REGSAVE_SIZE);                  // reg_save_area
         break;
 
     case EXPR_VA_END:                           // No-op on AMD64
@@ -673,22 +678,22 @@ static void gen_write(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offset, exp
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
-        emit(self, "\tmovb\t%%al, %d(%%rbp)\n", -(self->frame_size - offset));
+        emit(self, "\tmovb\t%%al, %d(%%rbp)\n", offset);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit(self, "\tmovw\t%%ax, %d(%%rbp)\n", -(self->frame_size - offset));
+        emit(self, "\tmovw\t%%ax, %d(%%rbp)\n", offset);
         break;
     case TY_INT:
     case TY_UINT:
-        emit(self, "\tmovl\t%%eax, %d(%%rbp)\n", -(self->frame_size - offset));
+        emit(self, "\tmovl\t%%eax, %d(%%rbp)\n", offset);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit(self, "\tmovq\t%%rax, %d(%%rbp)\n", -(self->frame_size - offset));
+        emit(self, "\tmovq\t%%rax, %d(%%rbp)\n", offset);
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -736,13 +741,13 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             emit(self, ".L%d:\n", map_goto(self, head->as_label.label));
             break;
         case STMT_CASE:
-            if (!jmp_ctx->case_tail)
+            if (!jmp_ctx->cases)
                 err("Case only allowed inside switch");
             emit_target(self, next_case_label(self, jmp_ctx,
                 head->as_case.begin, head->as_case.end));
             break;
         case STMT_DEFAULT:
-            if (!jmp_ctx->case_tail)
+            if (!jmp_ctx->cases)
                 err("Default only allowed inside switch");
             if (jmp_ctx->default_label != -1)
                 err("Only one default label allowed per switch");
@@ -776,7 +781,8 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         }
         case STMT_SWITCH:
         {
-            case_label_t *cases;
+            case_vec_t cases;
+            case_vec_init(&cases);
 
             int ladder_label = next_label(self);
             jmp_ctx_t switch_ctx = {
@@ -797,7 +803,8 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             // Generate selection ladder
             emit_target(self, ladder_label);
             gen_value(self, jmp_ctx, head->as_switch.cond);
-            for (case_label_t *cur = cases; cur; cur = cur->next)
+
+            VEC_FOREACH(&cases, cur)
                 if (cur->begin == cur->end) {
                     // Standard case
                     emit(self, "\tcmpq\t$%d, %%rax\n", cur->begin);
@@ -811,6 +818,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
                     emit_jump(self, "jle", cur->label);
                     emit_target(self, label_skip);
                 }
+
             if (switch_ctx.default_label != -1)
                 emit_jump(self, "jmp", switch_ctx.default_label);
 
@@ -823,7 +831,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
                 jmp_ctx->return_label,
                 next_label(self),
                 next_label(self),
-                jmp_ctx->case_tail,
+                jmp_ctx->cases,
                 jmp_ctx->default_label,
             };
 
@@ -845,7 +853,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
                 jmp_ctx->return_label,
                 next_label(self),
                 next_label(self),
-                jmp_ctx->case_tail,
+                jmp_ctx->cases,
                 jmp_ctx->default_label,
             };
 
@@ -865,7 +873,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
                 jmp_ctx->return_label,
                 next_label(self),
                 next_label(self),
-                jmp_ctx->case_tail,
+                jmp_ctx->cases,
                 jmp_ctx->default_label,
             };
 
@@ -909,9 +917,17 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             emit_jump(self, "jmp", jmp_ctx->return_label);
             break;
         case STMT_DECL:
-            gen_initializer(self, jmp_ctx, head->as_decl.sym->ty,
-                head->as_decl.sym->offset, &head->as_decl.init);
+        {
+            sym_t *sym = head->as_decl.sym;
+            // Allocate local variable
+            self->offset += sym->ty->size;
+            sym->offset = -(self->offset = align(self->offset, sym->ty->align));
+            // Generate initializer
+            if (head->as_decl.has_init)
+                gen_initializer(self, jmp_ctx,
+                    sym->ty, sym->offset, &head->as_decl.init);
             break;
+        }
         case STMT_EVAL:
             gen_value(self, jmp_ctx, head->as_eval.value);
             break;
@@ -929,29 +945,29 @@ static void gen_param_spill(gen_t *self, ty_t *ty, int offset, int i)
     case TY_CHAR:
     case TY_SCHAR:
     case TY_UCHAR:
-        emit(self, "\tmovb\t%s, %d(%%rsp)\n", barg[i], offset);
+        emit(self, "\tmovb\t%s, %d(%%rbp)\n", barg[i], offset);
         break;
     case TY_SHORT:
     case TY_USHORT:
-        emit(self, "\tmovw\t%s, %d(%%rsp)\n", warg[i], offset);
+        emit(self, "\tmovw\t%s, %d(%%rbp)\n", warg[i], offset);
         break;
     case TY_INT:
     case TY_UINT:
-        emit(self, "\tmovl\t%s, %d(%%rsp)\n", dwarg[i], offset);
+        emit(self, "\tmovl\t%s, %d(%%rbp)\n", dwarg[i], offset);
         break;
     case TY_LONG:
     case TY_ULONG:
     case TY_LLONG:
     case TY_ULLONG:
     case TY_POINTER:
-        emit(self, "\tmovq\t%s, %d(%%rsp)\n", qwarg[i], offset);
+        emit(self, "\tmovq\t%s, %d(%%rbp)\n", qwarg[i], offset);
         break;
     default:
         ASSERT_NOT_REACHED();
     }
 }
 
-void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
+void gen_func(gen_t *self, sym_t *sym, stmt_t *body)
 {
     emit(self, "\t.text\n");
     if (sym->kind != SYM_STATIC)
@@ -962,9 +978,9 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
         "%s:\n"
         "\tpush\t%%rbp\n"
         "\tmovq\t%%rsp, %%rbp\n"
-        "\tsubq\t$%d, %%rsp\n",
+        "\tsubq\t$%s_fs, %%rsp\n",
         sym->asm_name,
-        self->frame_size = align(offset, 16));
+        sym->asm_name);
 
 #ifdef RUNTIME_ASSERTIONS
     int lframe_ok = next_label(self);
@@ -977,29 +993,39 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
         ".L%d:\n", lframe_ok, lframe_ok);
 #endif
 
-    // Generate parameter spill code
-    int gp = 0, oflo = self->frame_size + 16;
+    // Start with an empty frame
+    self->offset = 0;
+
+    // Allocate varargs spill space
+    if (sym->ty->function.var)
+        self->offset += VA_REGSAVE_SIZE;
+
+    // Spill named parameters
+    int gp = 0, oflo = 16;
 
     for (param_t *param = sym->ty->function.params; param; param = param->next)
         if (gp < 6) {
-            gen_param_spill(self, param->sym->ty, param->sym->offset, gp++);
+            self->offset += param->ty->size;
+            self->offset = align(self->offset, param->ty->align);
+            gen_param_spill(self,
+                param->sym->ty,
+                param->sym->offset = -self->offset,
+                gp++);
         } else {
             int palign = param->ty->align;
-            oflo = align(oflo, palign < 8 ? 8 : palign);
-            param->sym->offset = oflo;
+            param->sym->offset =
+                (oflo = align(oflo, palign < 8 ? 8 : palign));
             oflo += param->ty->size;
         }
 
-    // Starting values for va_lists
     self->gp_offset = gp * 8;
     self->fp_offset = 48;
 
-    // Spill the rest of the registers for varargs
+    // Spill the rest of the registers for varargs registers
     if (sym->ty->function.var)
         for (; gp < 6; ++gp)
-            emit(self, "\tmovq\t%s, %d(%%rsp)\n", qwarg[gp], gp * 8);
+            emit(self, "\tmovq\t%s, %d(%%rbp)\n", qwarg[gp], -VA_REGSAVE_SIZE + gp * 8);
 
-    // Reset function state
     self->temp_cnt = 0;
     map_clear(&self->gotos);
 
@@ -1012,6 +1038,9 @@ void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body)
     emit(self,
         "\tleave\n"
         "\tret\n");
+
+    // Provide stackframe size
+    emit(self, "\t.set\t%s_fs, %d\n", sym->asm_name, align(self->offset, 16));
 }
 
 void gen_lits(gen_t *self)

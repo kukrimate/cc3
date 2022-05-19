@@ -1215,15 +1215,14 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
             sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
             if (sym->kind == SYM_LOCAL) {
+                // Locals are intermixed with code and represented in the AST
+                stmt_t *stmt = make_stmt(STMT_DECL);
+                stmt->as_decl.sym = sym;
                 if (maybe_want(self, TK_AS)) {
-                    // Locals are intermixed with code and represented in the AST
-                    stmt_t *stmt = make_stmt(STMT_DECL);
-                    stmt->as_decl.sym = sym;
+                    stmt->as_decl.has_init = true;
                     initializer(self, &stmt->as_decl.init, sym->ty);
-                    append_stmt(tail, stmt);
                 }
-
-                sema_alloc_local(&self->sema, sym);
+                append_stmt(tail, stmt);
             } else {
                 if (maybe_want(self, TK_AS)) {
                     // Static initializers get generated in the .data section
@@ -1448,48 +1447,31 @@ static stmt_t *read_block(cc3_t *self)
 
 static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
 {
-    sym_t *sym = sema_declare(&self->sema, sc, ty, name);
-
-    // Check for function definition
     // Make sure it is really a function
     if (ty->kind != TY_FUNCTION)
         err("Expected function type instead of %T", ty);
 
-    // HACK!: zero sema's picture of the frame size before
-    // entering the context of a new function
+    // Declare symbol
+    sym_t *sym = sema_declare(&self->sema, sc, ty, name);
+
+    // Provide function name for resolving __func__
     self->sema.func_name = sym->name;
-    self->sema.offset = 0;
-
-    // NOTE: if we are dealing with a varargs function, we *must*
-    // leave 48 bytes as a register save area
-    if (ty->function.var)
-        self->sema.offset = 48;
-
-    // Now we can allocate space in the stack frame for the
-    // parameters of the current function
-    int gp = 0;
-
-    for (param_t *param = ty->function.params; param; param = param->next) {
-        if (!param->sym)
-            err("Unnamed parameters are not allowed in function definitions");
-        if (gp < 6) {
-            sema_alloc_local(&self->sema, param->sym);
-            ++gp;
-        }
-    }
 
     // Bring parameters into scope for parsing the function body
     sema_push(&self->sema, ty->function.scope);
     stmt_t *body = read_block(self);
     sema_exit(&self->sema);
 
+    self->sema.func_name = NULL;
+
+#if 0
     // Dump function body for debugging
     printf("Defined functions %s\n", name);
     print_stmts(body, 1);
+#endif
 
-    // Then we can generate the function, providing the correct
-    // frame size from the hack above
-    gen_func(&self->gen, sym, self->sema.offset, body);
+    // Generate code for the function
+    gen_func(&self->gen, sym, body);
 }
 
 static void external_declaration(cc3_t *self, int sc, ty_t *ty, char *name)

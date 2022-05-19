@@ -422,7 +422,6 @@ struct sema {
 
     // HACK: current function specific stuff
     const char *func_name;
-    int offset;
 };
 
 void sema_init(sema_t *self);
@@ -435,8 +434,6 @@ scope_t *sema_pop(sema_t *self);
 
 // Declare a name
 sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name);
-// Callback for local variable allocation
-void sema_alloc_local(sema_t *self, sym_t *sym);
 // Declare an enumeration constant
 sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val);
 // Lookup a declaration in any scope
@@ -671,6 +668,7 @@ struct stmt {
 
         struct {
             sym_t *sym;
+            bool has_init;
             init_t init;
         } as_decl;
     };
@@ -694,8 +692,8 @@ struct gen {
 
     /** Function state **/
 
-    // Size of the current frame
-    int frame_size;
+    // Current offset into the frame
+    int offset;
     // Initial values for va_lists
     int gp_offset;
     int fp_offset;
@@ -709,7 +707,7 @@ void gen_init(gen_t *self, int out_fd);
 void gen_free(gen_t *self);
 
 void gen_static(gen_t *self, sym_t *sym, init_t *init);
-void gen_func(gen_t *self, sym_t *sym, int offset, stmt_t *body);
+void gen_func(gen_t *self, sym_t *sym, stmt_t *body);
 void gen_lits(gen_t *self);
 
 /** Parser **/

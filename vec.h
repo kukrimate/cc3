@@ -59,7 +59,7 @@ memb_ty *name ## _push(name ## _t *self)                                       \
 
 #define VEC_FOREACH(vec, cur)                                                  \
     for (__typeof__ ((vec)->data) cur = (vec)->data,                           \
-            end = cur + (vec)->length; cur < end; ++cur)
+            _end = cur + (vec)->length; cur < _end; ++cur)
 
 #define VEC_FOREACH_REV(vec, cur)                                              \
     for (__typeof__ ((vec)->data) cur = (vec)->data + (vec)->length - 1;       \

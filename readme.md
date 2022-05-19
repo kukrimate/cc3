@@ -25,6 +25,7 @@ GNU extensions are supported on top of standard:
 - Anonymous structs/unions (used by glibc and the compiler)
 - The `__typeof__` operator (used by the compiler)
 - Alternative spelling of inline as `__inline` (used by glibc)
+- Unnamed parameters in function definitions (will be standard in C2x)
 
 # Design
 
