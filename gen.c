@@ -240,15 +240,6 @@ static void emit_pop(gen_t *self, const char *reg)
     emit(self, "\tpop\t%s\n", reg);
 }
 
-static expr_t *match_unary(expr_t *expr, int kind1, int kind2)
-{
-    if (expr->kind != kind1)
-        return NULL;
-    if ((expr = expr->as_unary.arg)->kind != kind2)
-        return NULL;
-    return expr;
-}
-
 static void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label);
@@ -336,20 +327,10 @@ static void gen_call(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *func, expr_vec_t *
         emit_pop(self, qwarg[i]);
 
     // Generate call (zero rax for varargs FPU args)
-    ty_t *func_ty = func->ty->pointer.base_ty;
-    expr_t *sym = match_unary(func, EXPR_REF, EXPR_SYM);
-
-    if (sym) {
-        if (func_ty->function.var)
-            emit(self, "\txorl\t%%eax, %%eax\n");
-        emit(self, "\tcall\t%s@PLT\n", sym->as_sym->asm_name);
-    } else {
-        gen_value(self, jmp_ctx, func);
-        emit(self, "\tmovq\t%%rax, %%r10\n");
-        if (func_ty->function.var)
-            emit(self, "\txorl\t%%eax, %%eax\n");
-        emit(self, "\tcall\t*%%r10\n");
-    }
+    gen_value(self, jmp_ctx, func);
+    emit(self, "\tmovq\t%%rax, %%r10\n");
+    emit(self, "\txorl\t%%eax, %%eax\n");
+    emit(self, "\tcall\t*%%r10\n");
 
     // After the call remove overflow arguments and any padding
     if (oflo_cnt) {

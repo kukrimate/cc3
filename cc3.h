@@ -380,8 +380,6 @@ ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_vec_t *params, bool var)
 
 void print_ty(ty_t *ty);
 
-bool compare_ty(ty_t *ty1, ty_t *ty2, bool permit_void_ptr);
-
 /** Symbol table **/
 
 enum {

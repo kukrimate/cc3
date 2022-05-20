@@ -89,7 +89,7 @@ ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_vec_t *params, bool var)
     return ty;
 }
 
-bool compare_ty(ty_t *ty1, ty_t *ty2, bool permit_void_ptr)
+static bool compare_ty(ty_t *ty1, ty_t *ty2)
 {
     switch (ty1->kind) {
     case TY_VOID:
@@ -117,23 +117,14 @@ bool compare_ty(ty_t *ty1, ty_t *ty2, bool permit_void_ptr)
     case TY_POINTER:
         if (ty2->kind != TY_POINTER)
             return false;
-
-        // In some contexts void* compares equal to any pointer
-        if (permit_void_ptr) {
-            if (ty1->pointer.base_ty->kind == TY_VOID)
-                return true;
-            if (ty2->pointer.base_ty->kind == TY_VOID)
-                return true;
-        }
-
-        return compare_ty(ty1->pointer.base_ty, ty2->pointer.base_ty, false);
+        return compare_ty(ty1->pointer.base_ty, ty2->pointer.base_ty);
 
     case TY_ARRAY:
         if (ty2->kind != TY_ARRAY)
             return false;
         if (ty1->array.cnt != ty2->array.cnt)
             return false;
-        return compare_ty(ty1->array.elem_ty, ty2->array.elem_ty, false);
+        return compare_ty(ty1->array.elem_ty, ty2->array.elem_ty);
 
     case TY_FUNCTION:
         if (ty2->kind != TY_FUNCTION)
@@ -142,12 +133,12 @@ bool compare_ty(ty_t *ty1, ty_t *ty2, bool permit_void_ptr)
             return false;
         if (ty1->function.params.length != ty2->function.params.length)
             return false;
-        if (!compare_ty(ty1->function.ret_ty, ty2->function.ret_ty, false))
+        if (!compare_ty(ty1->function.ret_ty, ty2->function.ret_ty))
             return false;
         for (int i = 0; i < ty1->function.params.length; ++i)
             if (!compare_ty(VEC_AT(&ty1->function.params, i)->ty,
-                            VEC_AT(&ty2->function.params, i)->ty, false))
-                return false;
+                            VEC_AT(&ty2->function.params, i)->ty))
+            return false;
         return true;
 
     default:
@@ -433,21 +424,45 @@ expr_t *make_str_expr(char *data)
     return expr;
 }
 
+// Is an expression a NULL pointer constant?
+
+static bool is_null_const(expr_t *expr)
+{
+    return expr->ty->kind & TY_INT_MASK
+            && expr->kind == EXPR_CONST
+            && expr->as_const.value == 0;
+}
+
 // Degrade array and function types to pointers per (6.3.2.1)
 
-static expr_t *pointer_conv(expr_t *arg)
+static ty_t *find_ptr_base(ty_t *ty)
 {
-    if (arg->ty->kind == TY_ARRAY) {
-        expr_t *expr = alloc_expr(EXPR_REF);
-        expr->ty = make_pointer(arg->ty->array.elem_ty);
-        expr->as_unary.arg = arg;
-        return expr;
+    if (ty->kind == TY_POINTER)
+        return ty->pointer.base_ty;
+    if (ty->kind == TY_ARRAY)
+        return ty->array.elem_ty;
+    if (ty->kind == TY_FUNCTION)
+        return ty;
+    return NULL;
+}
+
+// Compare two pointers, taking degradation into account
+
+static ty_t *compare_ptrs(ty_t *ty1, ty_t *ty2, bool permit_void)
+{
+    if (!(ty1 = find_ptr_base(ty1)))
+        return NULL;
+    if (!(ty2 = find_ptr_base(ty2)))
+        return NULL;
+    if (permit_void) {
+        if (ty1->kind == TY_VOID)
+            return ty2;
+        if (ty2->kind == TY_VOID)
+            return ty1;
     }
-
-    if (arg->ty->kind == TY_FUNCTION)
-        return make_ref_expr(arg);
-
-    return arg;
+    if (!compare_ty(ty1, ty2))
+        return NULL;
+    return ty1;
 }
 
 //
@@ -475,8 +490,6 @@ static int find_memb(ty_t *ty, const char *name, ty_t **out)
 
 expr_t *make_memb_expr(expr_t *aggr, const char *name)
 {
-    aggr = pointer_conv(aggr);
-
     expr_t *expr = alloc_expr(EXPR_MEMB);
     expr->as_memb.aggr = aggr;
     expr->as_memb.name = strdup(name);
@@ -486,16 +499,35 @@ expr_t *make_memb_expr(expr_t *aggr, const char *name)
     return expr;
 }
 
-static expr_t *convert_by_assignment(ty_t *dest_ty, expr_t *src);
+static expr_t *convert_by_assignment(ty_t *dest_ty, expr_t *src)
+{
+    if (dest_ty->kind & TY_ARITH_MASK && src->ty->kind & TY_ARITH_MASK) {
+        if (dest_ty->kind != src->ty->kind)
+            return make_cast_expr(dest_ty, src);
+        else
+            return src;
+    }
+
+    if (dest_ty->kind & (TY_STRUCT | TY_UNION) && dest_ty == src->ty)
+        return src;
+
+    if (dest_ty->kind == TY_POINTER && compare_ptrs(dest_ty, src->ty, true))
+        return src;
+
+    if (dest_ty->kind == TY_POINTER && is_null_const(src))
+        return make_cast_expr(dest_ty, src);
+
+    if (dest_ty->kind == TY_BOOL && find_ptr_base(src->ty))
+        return make_cast_expr(dest_ty, src);
+
+    err("Cannot convert type %T to %T by assignment", src->ty, dest_ty);
+}
 
 expr_t *make_call_expr(expr_t *func, expr_vec_t *args)
 {
-    func = pointer_conv(func);
 
     // Called expression must be a function pointer after implicit conversions
-    ty_t *func_ty = NULL;
-    if (func->ty->kind == TY_POINTER && func->ty->pointer.base_ty->kind == TY_FUNCTION)
-        func_ty = func->ty->pointer.base_ty;
+    ty_t *func_ty = find_ptr_base(func->ty);
     if (!func_ty)
         err("Cannot call %T object", func->ty);
 
@@ -507,7 +539,7 @@ expr_t *make_call_expr(expr_t *func, expr_vec_t *args)
     VEC_FOREACH(args, arg)
         if (param < end_param) {
             // Function arguments get converted "as if by assignment"
-            *arg = convert_by_assignment(param++->ty, pointer_conv(*arg));
+            *arg = convert_by_assignment(param++->ty, *arg);
         } else if (func_ty->function.var) {
             // Variable arguments get the "default argument promotions"
             if ((*arg)->ty->kind & TY_PROMOTE_MASK)
@@ -541,21 +573,18 @@ expr_t *make_ref_expr(expr_t *arg)
 
 expr_t *make_dref_expr(expr_t *arg)
 {
-    arg = pointer_conv(arg);
-
-    if (arg->ty->kind != TY_POINTER)
+    ty_t *base_ty = find_ptr_base(arg->ty);
+    if (!base_ty)
         err("Dereference of non-pointer type %T", arg->ty);
 
     expr_t *expr = alloc_expr(EXPR_DREF);
-    expr->ty = arg->ty->pointer.base_ty;
+    expr->ty = base_ty;
     expr->as_unary.arg = arg;
     return expr;
 }
 
 expr_t *make_pos_expr(expr_t *arg)
 {
-    arg = pointer_conv(arg);
-
     if (!(arg->ty->kind & TY_ARITH_MASK))
         err("Unary + applied to non-arithmetic type %T", arg->ty);
 
@@ -567,8 +596,6 @@ expr_t *make_pos_expr(expr_t *arg)
 
 expr_t *make_neg_expr(expr_t *arg)
 {
-    arg = pointer_conv(arg);
-
     if (!(arg->ty->kind & TY_ARITH_MASK))
         err("Unary - applied to non-arithmetic type %T", arg->ty);
 
@@ -588,8 +615,6 @@ expr_t *make_neg_expr(expr_t *arg)
 
 expr_t *make_not_expr(expr_t *arg)
 {
-    arg = pointer_conv(arg);
-
     if (!(arg->ty->kind & TY_INT_MASK))
         err("Unary ~ applied to non-integer type %T", arg->ty);
 
@@ -609,8 +634,6 @@ expr_t *make_not_expr(expr_t *arg)
 
 expr_t *make_lnot_expr(expr_t *arg)
 {
-    arg = pointer_conv(arg);
-
     if (!(arg->ty->kind & TY_SCALAR_MASK))
         err("Unary ! applied to non-scalar type %T", arg->ty);
 
@@ -628,7 +651,7 @@ expr_t *make_lnot_expr(expr_t *arg)
 
 expr_t *make_sizeof_expr(ty_t *ty)
 {
-    if (ty->size == 0)
+    if (!ty->size)
         err("Requsted size of incomplete type %T", ty);
 
     return make_const_expr(&ty_ulong, ty->size);
@@ -636,12 +659,6 @@ expr_t *make_sizeof_expr(ty_t *ty)
 
 expr_t *make_cast_expr(ty_t *ty, expr_t *arg)
 {
-    arg = pointer_conv(arg);
-
-    // Avoid redundant type conversions
-    if (compare_ty(ty, arg->ty, false))
-        return arg;
-
     // Validate if the cast is allowed
     switch (ty->kind) {
     case TY_VOID:           // From all types
@@ -673,7 +690,9 @@ expr_t *make_cast_expr(ty_t *ty, expr_t *arg)
         goto error;
 
     case TY_POINTER:        // From integer and pointer types
-        if (arg->ty->kind & (TY_INT_MASK | TY_POINTER))
+        if (arg->ty->kind & TY_INT_MASK)
+            break;
+        if (find_ptr_base(arg->ty))
             break;
 
         FALLTHROUGH;
@@ -702,7 +721,8 @@ expr_t *make_cast_expr(ty_t *ty, expr_t *arg)
 void binary_promote(expr_t **lhs, expr_t **rhs)
 {
     ty_t *ty;
-    int kind1 = (*lhs)->ty->kind, kind2 = (*rhs)->ty->kind;
+    int kind1 = (*lhs)->ty->kind,
+        kind2 = (*rhs)->ty->kind;
 
     // Find the common arithmetic type
     if (kind1 == TY_LDOUBLE || kind2 == TY_LDOUBLE)
@@ -725,15 +745,14 @@ void binary_promote(expr_t **lhs, expr_t **rhs)
         ty = &ty_int;
 
     // Then perform any promotions that might be required
-    *lhs = make_cast_expr(ty, *lhs);
-    *rhs = make_cast_expr(ty, *rhs);
+    if (kind1 != ty->kind)
+        *lhs = make_cast_expr(ty, *lhs);
+    if (kind2 != ty->kind)
+        *rhs = make_cast_expr(ty, *rhs);
 }
 
 expr_t *make_mul_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK)
         goto type_ok;
 
@@ -757,9 +776,6 @@ type_ok:
 
 expr_t *make_div_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK)
         goto type_ok;
 
@@ -783,9 +799,6 @@ type_ok:
 
 expr_t *make_mod_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_INT_MASK && rhs->ty->kind & TY_INT_MASK)
         goto type_ok;
 
@@ -807,28 +820,25 @@ type_ok:
     return expr;
 }
 
-static expr_t *make_ptraddsub(int kind, expr_t *ptr, expr_t *idx)
+static expr_t *make_ptraddsub(int kind, ty_t *base_ty, expr_t *ptr, expr_t *idx)
 {
     if (!(idx->ty->kind & TY_INT_MASK))
         err("Non-integer type %T used as a pointer offset", idx->ty);
 
     expr_t *expr = alloc_expr(kind);
-    expr->ty = ptr->ty;
+    expr->ty = make_pointer(base_ty);
     expr->as_binary.lhs = ptr;
-    expr->as_binary.rhs = make_mul_expr(idx,
-        make_sizeof_expr(ptr->ty->pointer.base_ty));
+    expr->as_binary.rhs = make_mul_expr(idx, make_sizeof_expr(base_ty));
     return expr;
 }
 
 expr_t *make_add_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
-    if (lhs->ty->kind == TY_POINTER)
-        return make_ptraddsub(EXPR_ADD, lhs, rhs);
-    if (rhs->ty->kind == TY_POINTER)
-        return make_ptraddsub(EXPR_ADD, rhs, lhs);
+    ty_t *base_ty;
+    if ((base_ty = find_ptr_base(lhs->ty)))
+        return make_ptraddsub(EXPR_ADD, base_ty, lhs, rhs);
+    if ((base_ty = find_ptr_base(rhs->ty)))
+        return make_ptraddsub(EXPR_ADD, base_ty, rhs, lhs);
 
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK)
         goto type_ok;
@@ -851,29 +861,20 @@ type_ok:
     return expr;
 }
 
-static expr_t *make_ptrdiff(expr_t *ptr1, expr_t *ptr2)
-{
-    if (!compare_ty(ptr1->ty, ptr2->ty, false))
-        err("Substracted different pointers %T and %T", ptr1->ty, ptr2->ty);
-
-    expr_t *expr = alloc_expr(EXPR_SUB);
-    expr->ty = &ty_long;
-    expr->as_binary.lhs = ptr1;
-    expr->as_binary.rhs = ptr2;
-    return make_div_expr(expr, make_sizeof_expr(ptr1->ty->pointer.base_ty));
-}
-
 expr_t *make_sub_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
+    ty_t *base_ty;
 
-    if (lhs->ty->kind == TY_POINTER) {
-        if (rhs->ty->kind == TY_POINTER)
-            return make_ptrdiff(lhs, rhs);
-        else
-            return make_ptraddsub(EXPR_SUB, lhs, rhs);
+    if ((base_ty = compare_ptrs(lhs->ty, rhs->ty, false))) {
+        expr_t *expr = alloc_expr(EXPR_SUB);
+        expr->ty = &ty_long;
+        expr->as_binary.lhs = lhs;
+        expr->as_binary.rhs = rhs;
+        return make_div_expr(expr, make_sizeof_expr(base_ty));
     }
+
+    if ((base_ty = find_ptr_base(lhs->ty)))
+        return make_ptraddsub(EXPR_SUB, base_ty, lhs, rhs);
 
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK)
         goto type_ok;
@@ -898,9 +899,6 @@ type_ok:
 
 expr_t *make_lsh_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_INT_MASK && rhs->ty->kind & TY_INT_MASK)
         goto type_ok;
 
@@ -927,9 +925,6 @@ type_ok:
 
 expr_t *make_rsh_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_INT_MASK && rhs->ty->kind & TY_INT_MASK)
         goto type_ok;
 
@@ -956,15 +951,12 @@ type_ok:
 
 expr_t *make_lt_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK) {
         binary_promote(&lhs, &rhs);
         goto type_ok;
     }
 
-    if (lhs->ty->kind == TY_POINTER && compare_ty(lhs->ty, rhs->ty, false))
+    if (compare_ptrs(lhs->ty, rhs->ty, false))
         goto type_ok;
 
     err("Cannot apply < to types %T and %T", lhs->ty, rhs->ty);
@@ -985,15 +977,12 @@ type_ok:
 
 expr_t *make_gt_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK) {
         binary_promote(&lhs, &rhs);
         goto type_ok;
     }
 
-    if (lhs->ty->kind == TY_POINTER && compare_ty(lhs->ty, rhs->ty, false))
+    if (compare_ptrs(lhs->ty, rhs->ty, false))
         goto type_ok;
 
     err("Cannot apply > to types %T and %T", lhs->ty, rhs->ty);
@@ -1014,15 +1003,12 @@ type_ok:
 
 expr_t *make_le_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK) {
         binary_promote(&lhs, &rhs);
         goto type_ok;
     }
 
-    if (lhs->ty->kind == TY_POINTER && compare_ty(lhs->ty, rhs->ty, false))
+    if (compare_ptrs(lhs->ty, rhs->ty, false))
         goto type_ok;
 
     err("Cannot apply <= to types %T and %T", lhs->ty, rhs->ty);
@@ -1043,15 +1029,12 @@ type_ok:
 
 expr_t *make_ge_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK) {
         binary_promote(&lhs, &rhs);
         goto type_ok;
     }
 
-    if (lhs->ty->kind == TY_POINTER && compare_ty(lhs->ty, rhs->ty, false))
+    if (compare_ptrs(lhs->ty, rhs->ty, false))
         goto type_ok;
 
     err("Cannot apply >= to types %T and %T", lhs->ty, rhs->ty);
@@ -1070,32 +1053,23 @@ type_ok:
     return expr;
 }
 
-static bool is_null_const(expr_t *expr)
-{
-    return expr->ty->kind & TY_INT_MASK &&
-            expr->kind == EXPR_CONST &&
-            expr->as_const.value == 0;
-}
-
 expr_t *make_eq_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK) {
         binary_promote(&lhs, &rhs);
         goto type_ok;
     }
 
-    if (lhs->ty->kind == TY_POINTER && compare_ty(lhs->ty, rhs->ty, true))
+    if (compare_ptrs(lhs->ty, rhs->ty, true))
         goto type_ok;
 
-    if (lhs->ty->kind == TY_POINTER && is_null_const(rhs)) {
+
+    if (find_ptr_base(lhs->ty) && is_null_const(rhs)) {
         rhs = make_cast_expr(lhs->ty, rhs);
         goto type_ok;
     }
 
-    if (is_null_const(lhs) && rhs->ty->kind == TY_POINTER) {
+    if (find_ptr_base(rhs->ty) && is_null_const(lhs)) {
         lhs = make_cast_expr(rhs->ty, lhs);
         goto type_ok;
     }
@@ -1118,23 +1092,20 @@ type_ok:
 
 expr_t *make_ne_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_ARITH_MASK && rhs->ty->kind & TY_ARITH_MASK) {
         binary_promote(&lhs, &rhs);
         goto type_ok;
     }
 
-    if (lhs->ty->kind == TY_POINTER && compare_ty(lhs->ty, rhs->ty, true))
+    if (compare_ptrs(lhs->ty, rhs->ty, true))
         goto type_ok;
 
-    if (lhs->ty->kind == TY_POINTER && is_null_const(rhs)) {
+    if (find_ptr_base(lhs->ty) && is_null_const(rhs)) {
         rhs = make_cast_expr(lhs->ty, rhs);
         goto type_ok;
     }
 
-    if (is_null_const(lhs) && rhs->ty->kind == TY_POINTER) {
+    if (find_ptr_base(rhs->ty) && is_null_const(lhs)) {
         lhs = make_cast_expr(rhs->ty, lhs);
         goto type_ok;
     }
@@ -1157,9 +1128,6 @@ type_ok:
 
 expr_t *make_and_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_INT_MASK && rhs->ty->kind & TY_INT_MASK)
         goto type_ok;
 
@@ -1183,9 +1151,6 @@ type_ok:
 
 expr_t *make_xor_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_INT_MASK && rhs->ty->kind & TY_INT_MASK)
         goto type_ok;
 
@@ -1209,9 +1174,6 @@ type_ok:
 
 expr_t *make_or_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_INT_MASK && rhs->ty->kind & TY_INT_MASK)
         goto type_ok;
 
@@ -1235,9 +1197,6 @@ type_ok:
 
 expr_t *make_land_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_SCALAR_MASK && rhs->ty->kind & TY_SCALAR_MASK)
         goto type_ok;
 
@@ -1260,9 +1219,6 @@ type_ok:
 
 expr_t *make_lor_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     if (lhs->ty->kind & TY_SCALAR_MASK && rhs->ty->kind & TY_SCALAR_MASK)
         goto type_ok;
 
@@ -1285,10 +1241,6 @@ type_ok:
 
 expr_t *make_cond_expr(expr_t *cond, expr_t *val1, expr_t *val2)
 {
-    cond = pointer_conv(cond);
-    val1 = pointer_conv(val1);
-    val2 = pointer_conv(val2);
-
     if (!(cond->ty->kind & TY_SCALAR_MASK))
         err("Non-scalar first operand %T of ?:", cond->ty);
 
@@ -1303,15 +1255,15 @@ expr_t *make_cond_expr(expr_t *cond, expr_t *val1, expr_t *val2)
     if (val1->ty->kind == TY_VOID && val2->ty->kind == TY_VOID)
         goto type_ok;
 
-    if (val1->ty->kind == TY_POINTER && compare_ty(val1->ty, val2->ty, true))
+    if (compare_ptrs(val1->ty, val2->ty, true))
         goto type_ok;
 
-    if (val1->ty->kind == TY_POINTER && is_null_const(val2)) {
+    if (find_ptr_base(val1->ty) && is_null_const(val2)) {
         val2 = make_cast_expr(val1->ty, val2);
         goto type_ok;
     }
 
-    if (is_null_const(val1) && val2->ty->kind == TY_POINTER) {
+    if (find_ptr_base(val2->ty) && is_null_const(val1)) {
         val1 = make_cast_expr(val2->ty, val1);
         goto type_ok;
     }
@@ -1331,35 +1283,8 @@ type_ok:
     return expr;
 }
 
-static expr_t *convert_by_assignment(ty_t *dest_ty, expr_t *src)
-{
-    if (dest_ty->kind & TY_ARITH_MASK && src->ty->kind & TY_ARITH_MASK)
-        goto type_ok;
-
-    if (dest_ty->kind & (TY_STRUCT | TY_UNION) && dest_ty == src->ty)
-        goto type_ok;
-
-    if (dest_ty->kind == TY_POINTER && compare_ty(dest_ty, src->ty, true))
-        goto type_ok;
-
-    if (dest_ty->kind == TY_POINTER && is_null_const(src))
-        goto type_ok;
-
-    if (dest_ty->kind == TY_BOOL && src->ty->kind == TY_POINTER)
-        goto type_ok;
-
-    err("Cannot convert type %T to %T by assignment", src->ty, dest_ty);
-
-type_ok:
-
-    return make_cast_expr(dest_ty, src);
-}
-
 expr_t *make_as_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     expr_t *expr = alloc_expr(EXPR_AS);
     expr->ty = lhs->ty;
     expr->as_binary.lhs = lhs;
@@ -1369,9 +1294,6 @@ expr_t *make_as_expr(expr_t *lhs, expr_t *rhs)
 
 expr_t *make_seq_expr(expr_t *lhs, expr_t *rhs)
 {
-    lhs = pointer_conv(lhs);
-    rhs = pointer_conv(rhs);
-
     expr_t *expr = alloc_expr(EXPR_SEQ);
     expr->ty = rhs->ty;
     expr->as_binary.lhs = lhs;
@@ -1396,7 +1318,6 @@ expr_t *make_stmt_expr(stmt_vec_t *stmts)
 
 void make_init_expr(init_t *out, ty_t *dest_ty, expr_t *expr)
 {
-    expr = pointer_conv(expr);
     out->kind = INIT_EXPR;
     out->as_expr = convert_by_assignment(dest_ty, expr);
 }
