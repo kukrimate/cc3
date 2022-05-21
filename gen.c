@@ -11,25 +11,6 @@ static const char *qwarg[] = { "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9" };
 
 #define VA_REGSAVE_SIZE 48
 
-/** Context for jumps **/
-
-typedef struct {
-    int label;
-    int begin;
-    int end;
-} case_t;
-
-VEC_DEF(case_vec, case_t)
-VEC_GEN(case_vec, case_t)
-
-typedef struct {
-    int return_label;
-    int continue_label;
-    int break_label;
-    case_vec_t *cases;
-    int default_label;
-} jmp_ctx_t;
-
 /** Code generator **/
 
 void gen_init(gen_t *self, int out_fd)
@@ -191,16 +172,16 @@ void gen_static(gen_t *self, sym_t *sym, init_t *init)
     gen_static_initializer(self, sym->ty, init);
 }
 
-static int next_case_label(gen_t *self, jmp_ctx_t *jmp_ctx, int begin, int end)
+static int next_case_label(gen_t *self, int begin, int end)
 {
     // Verify that it doesn't overlap with any previous cases
-    VEC_FOREACH(jmp_ctx->cases, cur)
+    VEC_FOREACH(self->cases, cur)
         if ((cur->begin >= begin && cur->begin <= end)
                 || (cur->end >= begin && cur->end <= end))
             err("Overlapping case statements");
 
     // If there was no overlap we can add a new case label
-    case_t *cur = case_vec_push(jmp_ctx->cases);
+    case_t *cur = case_vec_push(self->cases);
     cur->begin = begin;
     cur->end = end;
     return cur->label = next_label(self);
@@ -240,12 +221,12 @@ static void emit_pop(gen_t *self, const char *reg)
     emit(self, "\tpop\t%s\n", reg);
 }
 
-static void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
-static void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
-static void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label);
-static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_vec_t *stmts);
+static void gen_addr(gen_t *self, expr_t *expr);
+static void gen_value(gen_t *self, expr_t *expr);
+static void gen_bool(gen_t *self, expr_t *expr, bool val, int label);
+static void gen_stmts(gen_t *self, stmt_vec_t *stmts);
 
-void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
+void gen_addr(gen_t *self, expr_t *expr)
 {
     switch (expr->kind) {
     case EXPR_SYM:
@@ -263,15 +244,15 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
                     lit_to_label(self, expr->as_str.data));
         break;
     case EXPR_MEMB:
-        gen_addr(self, jmp_ctx, expr->as_memb.aggr);
+        gen_addr(self, expr->as_memb.aggr);
         if (expr->as_memb.offset)
             emit(self, "\taddq\t$%d, %%rax\n", expr->as_memb.offset);
         break;
     case EXPR_DREF:
-        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        gen_value(self, expr->as_unary.arg);
         break;
     case EXPR_VA_ARG:
-        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        gen_value(self, expr->as_unary.arg);
 
         emit(self,
             "\tmovq\t%%rax, %%rcx\n"        // rcx = &va_list
@@ -302,7 +283,7 @@ void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     }
 }
 
-static void gen_call(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *func, expr_vec_t *args)
+static void gen_call(gen_t *self, expr_t *func, expr_vec_t *args)
 {
     // Calculate the number of overflow arguments
     int oflo_cnt;
@@ -319,7 +300,7 @@ static void gen_call(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *func, expr_vec_t *
 
     // Push arguments on the stack in reverse order
     VEC_FOREACH_REV(args, arg) {
-        gen_value(self, jmp_ctx, *arg);
+        gen_value(self, *arg);
         emit_push(self, "%rax");
     }
     // Pop off the ones that belong in registers
@@ -327,7 +308,7 @@ static void gen_call(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *func, expr_vec_t *
         emit_pop(self, qwarg[i]);
 
     // Generate call (zero rax for varargs FPU args)
-    gen_value(self, jmp_ctx, func);
+    gen_value(self, func);
     emit(self, "\tmovq\t%%rax, %%r10\n");
     emit(self, "\txorl\t%%eax, %%eax\n");
     emit(self, "\tcall\t*%%r10\n");
@@ -339,7 +320,7 @@ static void gen_call(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *func, expr_vec_t *
     }
 }
 
-void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
+void gen_value(gen_t *self, expr_t *expr)
 {
     switch (expr->kind) {
     case EXPR_SYM:
@@ -348,7 +329,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     case EXPR_DREF:
     case EXPR_VA_ARG:
         // Generate lvalue address
-        gen_addr(self, jmp_ctx, expr);
+        gen_addr(self, expr);
 
         switch (expr->ty->kind) {
         // Extend smaller types to fill rax
@@ -401,7 +382,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         break;
 
     case EXPR_CALL:
-        gen_call(self, jmp_ctx, expr->as_call.func, &expr->as_call.args);
+        gen_call(self, expr->as_call.func, &expr->as_call.args);
         // Extend smaller then wordsize return value
         switch (expr->ty->kind) {
         case TY_CHAR:
@@ -417,20 +398,20 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         break;
 
     case EXPR_REF:
-        gen_addr(self, jmp_ctx, expr->as_unary.arg);
+        gen_addr(self, expr->as_unary.arg);
         break;
 
     case EXPR_CAST:
-        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        gen_value(self, expr->as_unary.arg);
         break;
 
     case EXPR_NEG:
-        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        gen_value(self, expr->as_unary.arg);
         emit(self, "\tnegq\t%%rax\n");
         break;
 
     case EXPR_NOT:
-        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        gen_value(self, expr->as_unary.arg);
         emit(self, "\tnotq\t%%rax\n");
         break;
 
@@ -444,9 +425,9 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     case EXPR_AND:
     case EXPR_XOR:
     case EXPR_OR:
-        gen_value(self, jmp_ctx, expr->as_binary.rhs);
+        gen_value(self, expr->as_binary.rhs);
         emit_push(self, "%rax");
-        gen_value(self, jmp_ctx, expr->as_binary.lhs);
+        gen_value(self, expr->as_binary.lhs);
         emit_pop(self, "%rcx");
 
         switch (expr->kind) {
@@ -477,7 +458,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     {
         // Compile boolean expression to jumping code as normal
         int lfalse = next_label(self), lend = next_label(self);
-        gen_bool(self, jmp_ctx, expr, false, lfalse);
+        gen_bool(self, expr, false, lfalse);
         // Then add the landing zone that sets rax based on the target
         emit(self, "\tmovl\t$1, %%eax\n");
         emit_jump(self, "jmp", lend);
@@ -489,9 +470,9 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 
     case EXPR_AS:
     {
-        gen_addr(self, jmp_ctx, expr->as_binary.lhs);
+        gen_addr(self, expr->as_binary.lhs);
         emit_push(self, "%rax");
-        gen_value(self, jmp_ctx, expr->as_binary.rhs);
+        gen_value(self, expr->as_binary.rhs);
         emit_pop(self, "%rcx");
 
         switch (expr->ty->kind) {
@@ -535,29 +516,29 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
     {
         // Compile arg1 as the condition
         int lfalse = next_label(self), lend = next_label(self);
-        gen_bool(self, jmp_ctx, expr->as_trinary.arg1, false, lfalse);
+        gen_bool(self, expr->as_trinary.arg1, false, lfalse);
         // Evaluate arg2 in the true case
-        gen_value(self, jmp_ctx, expr->as_trinary.arg2);
+        gen_value(self, expr->as_trinary.arg2);
         emit_jump(self, "jmp", lend);
         emit_target(self, lfalse);
         // Evaluate arg3 in the false case
-        gen_value(self, jmp_ctx, expr->as_trinary.arg3);
+        gen_value(self, expr->as_trinary.arg3);
         emit_target(self, lend);
         break;
     }
 
     case EXPR_SEQ:
-        gen_value(self, jmp_ctx, expr->as_binary.lhs);
-        gen_value(self, jmp_ctx, expr->as_binary.rhs);
+        gen_value(self, expr->as_binary.lhs);
+        gen_value(self, expr->as_binary.rhs);
         break;
 
     case EXPR_STMT:
-        gen_stmts(self, jmp_ctx, &expr->as_stmts);
+        gen_stmts(self, &expr->as_stmts);
         break;
 
     case EXPR_VA_START:
         // Get the address of the va_list
-        gen_value(self, jmp_ctx, expr->as_unary.arg);
+        gen_value(self, expr->as_unary.arg);
         // Write gp_offset and fp_offset
         emit(self,
             "\tmovl\t$%d, (%%rax)\n"
@@ -596,7 +577,7 @@ static inline const char *jcc(int kind, bool val)
     }
 }
 
-void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label)
+void gen_bool(gen_t *self, expr_t *expr, bool val, int label)
 {
     switch (expr->kind) {
     // Boolean expression
@@ -607,9 +588,9 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
     case EXPR_EQ:
     case EXPR_NE:
         // Generate comparison
-        gen_value(self,jmp_ctx, expr->as_binary.lhs);
+        gen_value(self, expr->as_binary.lhs);
         emit_push(self, "%rax");
-        gen_value(self, jmp_ctx, expr->as_binary.rhs);
+        gen_value(self, expr->as_binary.rhs);
         emit(self, "\tmovq\t%%rax, %%rcx\n");
         emit_pop(self, "%rax");
         emit(self, "\tcmpq\t%%rcx, %%rax\n");
@@ -617,42 +598,42 @@ void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label
         emit_jump(self, jcc(expr->kind, val), label);
         break;
     case EXPR_LNOT:
-        gen_bool(self, jmp_ctx, expr->as_unary.arg, !val, label);
+        gen_bool(self, expr->as_unary.arg, !val, label);
         break;
     case EXPR_LAND:
         if (val) {
             int lfall = next_label(self);
-            gen_bool(self, jmp_ctx, expr->as_binary.lhs, false, lfall);
-            gen_bool(self, jmp_ctx, expr->as_binary.rhs, true, label);
+            gen_bool(self, expr->as_binary.lhs, false, lfall);
+            gen_bool(self, expr->as_binary.rhs, true, label);
             emit_target(self, lfall);
         } else {
-            gen_bool(self, jmp_ctx, expr->as_binary.lhs, false, label);
-            gen_bool(self, jmp_ctx, expr->as_binary.rhs, false, label);
+            gen_bool(self, expr->as_binary.lhs, false, label);
+            gen_bool(self, expr->as_binary.rhs, false, label);
         }
         break;
     case EXPR_LOR:
         if (val) {
-            gen_bool(self, jmp_ctx, expr->as_binary.lhs, true, label);
-            gen_bool(self, jmp_ctx, expr->as_binary.rhs, true, label);
+            gen_bool(self, expr->as_binary.lhs, true, label);
+            gen_bool(self, expr->as_binary.rhs, true, label);
         } else {
             int lfall = next_label(self);
-            gen_bool(self, jmp_ctx, expr->as_binary.lhs, true, lfall);
-            gen_bool(self, jmp_ctx, expr->as_binary.rhs, false, label);
+            gen_bool(self, expr->as_binary.lhs, true, lfall);
+            gen_bool(self, expr->as_binary.rhs, false, label);
             emit_target(self, lfall);
         }
         break;
     // Test for value
     default:
-        gen_value(self, jmp_ctx, expr);
+        gen_value(self, expr);
         emit(self, "\ttestq\t%%rax, %%rax\n");
         emit_jump(self, val ? "jnz" : "jz", label);
         break;
     }
 }
 
-static void gen_write(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offset, expr_t *expr)
+static void gen_write(gen_t *self, ty_t *ty, int offset, expr_t *expr)
 {
-    gen_value(self, jmp_ctx, expr);
+    gen_value(self, expr);
     switch (ty->kind) {
     case TY_BOOL:
     case TY_CHAR:
@@ -680,40 +661,39 @@ static void gen_write(gen_t *self, jmp_ctx_t *jmp_ctx, ty_t *ty, int offset, exp
     }
 }
 
-static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
-    ty_t *ty, int offset, init_t *init)
+static void gen_initializer(gen_t *self, ty_t *ty, int offset, init_t *init)
 {
     switch (ty->kind) {
     case TY_STRUCT:
         assert(init->kind == INIT_LIST);
         int i = 0;
         VEC_FOREACH(&ty->as_aggregate.members, memb) {
-            gen_initializer(self, jmp_ctx, memb->ty,
+            gen_initializer(self, memb->ty,
                 offset + memb->offset, VEC_AT(&init->as_list, i++));
         }
         break;
     case TY_UNION:
         assert(init->kind == INIT_LIST);
-        memb_t *first = VEC_AT(&ty->as_aggregate.members, 0);
-        gen_initializer(self, jmp_ctx, first->ty, offset + first->offset,
-            VEC_AT(&init->as_list, 0));
+        gen_initializer(self,
+            VEC_AT(&ty->as_aggregate.members, 0)->ty,
+            offset, VEC_AT(&init->as_list, 0));
         break;
     case TY_ARRAY:
         assert(init->kind == INIT_LIST);
         for (int i = 0; i < ty->array.cnt; ++i) {
-            gen_initializer(self, jmp_ctx, ty->array.elem_ty,
+            gen_initializer(self, ty->array.elem_ty,
                 offset, VEC_AT(&init->as_list, i));
             offset += ty->array.elem_ty->size;
         }
         break;
     default:
         assert(init->kind == INIT_EXPR);
-        gen_write(self, jmp_ctx, ty, offset, init->as_expr);
+        gen_write(self, ty, offset, init->as_expr);
         break;
     }
 }
 
-static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_vec_t *stmts)
+static void gen_stmts(gen_t *self, stmt_vec_t *stmts)
 {
     VEC_FOREACH(stmts, head)
         switch (head->kind) {
@@ -721,61 +701,62 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_vec_t *stmts)
             emit(self, ".L%d:\n", map_goto(self, head->as_label.label));
             break;
         case STMT_CASE:
-            if (!jmp_ctx->cases)
+            if (!self->cases)
                 err("Case only allowed inside switch");
-            emit_target(self, next_case_label(self, jmp_ctx,
+            emit_target(self, next_case_label(self,
                 head->as_case.begin, head->as_case.end));
             break;
         case STMT_DEFAULT:
-            if (!jmp_ctx->cases)
+            if (!self->cases)
                 err("Default only allowed inside switch");
-            if (jmp_ctx->default_label != -1)
+            if (self->default_label != -1)
                 err("Only one default label allowed per switch");
-            emit_target(self, jmp_ctx->default_label = next_label(self));
+            emit_target(self, self->default_label = next_label(self));
             break;
         case STMT_IF:
         {
-            int lelse = next_label(self),
-                lend = next_label(self);
+            int else_label = next_label(self),
+                end_label = next_label(self);
 
             // Generate test
-            gen_bool(self, jmp_ctx, head->as_if.cond, false, lelse);
+            gen_bool(self, head->as_if.cond, false, else_label);
 
             // Generate then
-            gen_stmts(self, jmp_ctx, &head->as_if.then_body);
-            emit_jump(self, "jmp", lend);
+            gen_stmts(self, &head->as_if.then_body);
+            emit_jump(self, "jmp", end_label);
 
             // Generate else
-            emit_target(self, lelse);
-            gen_stmts(self, jmp_ctx, &head->as_if.else_body);
+            emit_target(self, else_label);
+            gen_stmts(self, &head->as_if.else_body);
 
-            emit_target(self, lend);
+            emit_target(self, end_label);
             break;
         }
         case STMT_SWITCH:
         {
+            // Save previous context
+            int prev_break = self->break_label;
+            int prev_default = self->default_label;
+            case_vec_t *prev_cases = self->cases;
+
+            // Create new context
             case_vec_t cases;
             case_vec_init(&cases);
-
-            int ladder_label = next_label(self);
-            jmp_ctx_t switch_ctx = {
-                jmp_ctx->return_label,
-                jmp_ctx->continue_label,
-                next_label(self),
-                &cases,
-                -1,
-            };
+            self->break_label = next_label(self);
+            self->default_label = -1;
+            self->cases = &cases;
 
             // Jump to selection ladder
+            int ladder_label = next_label(self);
             emit_jump(self, "jmp", ladder_label);
 
             // Generate body
-            gen_stmts(self, &switch_ctx, &head->as_switch.body);
-            emit_jump(self, "jmp", switch_ctx.break_label);
+            gen_stmts(self, &head->as_switch.body);
+            emit_jump(self, "jmp", self->break_label);
 
             // Generate selection ladder
             emit_target(self, ladder_label);
-            gen_value(self, jmp_ctx, head->as_switch.cond);
+            gen_value(self, head->as_switch.cond);
 
             VEC_FOREACH(&cases, cur)
                 if (cur->begin == cur->end) {
@@ -792,104 +773,117 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_vec_t *stmts)
                     emit_target(self, label_skip);
                 }
 
-            if (switch_ctx.default_label != -1)
-                emit_jump(self, "jmp", switch_ctx.default_label);
+            if (self->default_label != -1)
+                emit_jump(self, "jmp", self->default_label);
 
-            emit_target(self, switch_ctx.break_label);
+            emit_target(self, self->break_label);
+
+            // Restore previous context
+            self->break_label = prev_break;
+            self->default_label = prev_default;
+            self->cases = prev_cases;
             break;
         }
         case STMT_WHILE:
         {
-            jmp_ctx_t loop_ctx = {
-                jmp_ctx->return_label,
-                next_label(self),
-                next_label(self),
-                jmp_ctx->cases,
-                jmp_ctx->default_label,
-            };
+            // Save previous context
+            int prev_break = self->break_label;
+            int prev_continue = self->continue_label;
+
+            // Create new context
+            self->break_label = next_label(self);
+            self->continue_label = next_label(self);
 
             // Generate test
-            emit_target(self, loop_ctx.continue_label);
-            gen_bool(self, jmp_ctx, head->as_while.cond, false, loop_ctx.break_label);
+            emit_target(self, self->continue_label);
+            gen_bool(self, head->as_while.cond, false, self->break_label);
 
             // Generate body
-            gen_stmts(self, &loop_ctx, &head->as_while.body);
+            gen_stmts(self, &head->as_while.body);
 
             // Jump back to test
-            emit_jump(self, "jmp", loop_ctx.continue_label);
-            emit_target(self, loop_ctx.break_label);
+            emit_jump(self, "jmp", self->continue_label);
+            emit_target(self, self->break_label);
+
+            // Restore previous context
+            self->break_label = prev_break;
+            self->continue_label = prev_continue;
             break;
         }
         case STMT_DO:
         {
-            jmp_ctx_t loop_ctx = {
-                jmp_ctx->return_label,
-                next_label(self),
-                next_label(self),
-                jmp_ctx->cases,
-                jmp_ctx->default_label,
-            };
+            // Save previous context
+            int prev_break = self->break_label;
+            int prev_continue = self->continue_label;
+            // Create new context
+            self->break_label = next_label(self);
+            self->continue_label = next_label(self);
 
             // Generate continue target and body
-            emit_target(self, loop_ctx.continue_label);
-            gen_stmts(self, &loop_ctx, &head->as_do.body);
+            emit_target(self, self->continue_label);
+            gen_stmts(self, &head->as_do.body);
 
             // Generate test
-            gen_bool(self, jmp_ctx, head->as_do.cond, true, loop_ctx.continue_label);
-            emit_target(self, loop_ctx.break_label);
+            gen_bool(self, head->as_do.cond, true, self->continue_label);
+            emit_target(self, self->break_label);
+
+            // Restore previous context
+            self->break_label = prev_break;
+            self->continue_label = prev_continue;
             break;
         }
         case STMT_FOR:
         {
-            int test_label = next_label(self);
-            jmp_ctx_t loop_ctx = {
-                jmp_ctx->return_label,
-                next_label(self),
-                next_label(self),
-                jmp_ctx->cases,
-                jmp_ctx->default_label,
-            };
+            // Save previous context
+            int prev_break = self->break_label;
+            int prev_continue = self->continue_label;
+            // Create new context
+            self->break_label = next_label(self);
+            self->continue_label = next_label(self);
 
             // Generate initialization before the loop
             if (head->as_for.init)
-                gen_value(self, jmp_ctx, head->as_for.init);
+                gen_value(self, head->as_for.init);
 
             // Generate test
+            int test_label = next_label(self);
             emit_target(self, test_label);
             if (head->as_for.cond)
-                gen_bool(self, jmp_ctx, head->as_for.cond, false, loop_ctx.break_label);
+                gen_bool(self, head->as_for.cond, false, self->break_label);
 
             // Generate body and increment
-            gen_stmts(self, &loop_ctx, &head->as_for.body);
+            gen_stmts(self, &head->as_for.body);
 
-            emit_target(self, loop_ctx.continue_label);
+            emit_target(self, self->continue_label);
             if (head->as_for.incr)
-                gen_value(self, jmp_ctx, head->as_for.incr);
+                gen_value(self, head->as_for.incr);
 
             // Jump back to the test
             emit_jump(self, "jmp", test_label);
-            emit_target(self, loop_ctx.break_label);
+            emit_target(self, self->break_label);
+
+            // Restore previous context
+            self->break_label = prev_break;
+            self->continue_label = prev_continue;
             break;
         }
         case STMT_GOTO:
             emit(self, "\tjmp\t.L%d\n", map_goto(self, head->as_goto.label));
             break;
         case STMT_CONTINUE:
-            if (jmp_ctx->continue_label == -1)
+            if (self->continue_label == -1)
                 err("Continue statement only allowed inside loops");
-            emit_jump(self, "jmp", jmp_ctx->continue_label);
+            emit_jump(self, "jmp", self->continue_label);
             break;
         case STMT_BREAK:
-            if (jmp_ctx->break_label == -1)
+            if (self->break_label == -1)
                 err("break statement only allowed inside loops or switch");
-            emit_jump(self, "jmp", jmp_ctx->break_label);
+            emit_jump(self, "jmp", self->break_label);
             break;
         case STMT_RETURN:
             if (head->as_return.value)
-                gen_value(self, jmp_ctx, head->as_return.value);
-            else
-                head->as_return.value = NULL;
-            emit_jump(self, "jmp", jmp_ctx->return_label);
+                gen_value(self, head->as_return.value);
+            emit_jump(self, "jmp", self->return_label);
             break;
         case STMT_DECL:
         {
@@ -899,12 +893,11 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_vec_t *stmts)
             sym->offset = -(self->offset = align(self->offset, sym->ty->align));
             // Generate initializer
             if (head->as_decl.has_init)
-                gen_initializer(self, jmp_ctx,
-                    sym->ty, sym->offset, &head->as_decl.init);
+                gen_initializer(self, sym->ty, sym->offset, &head->as_decl.init);
             break;
         }
         case STMT_EVAL:
-            gen_value(self, jmp_ctx, head->as_eval.value);
+            gen_value(self, head->as_eval.value);
             break;
         default:
             ASSERT_NOT_REACHED();
@@ -1002,14 +995,18 @@ void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
             emit(self, "\tmovq\t%s, %d(%%rbp)\n", qwarg[gp], -VA_REGSAVE_SIZE + gp * 8);
 
     self->temp_cnt = 0;
+    self->return_label = next_label(self);
+    self->break_label = -1;
+    self->continue_label = -1;
+    self->default_label = -1;
+    self->cases = NULL;
     map_clear(&self->gotos);
 
     // Generate body
-    jmp_ctx_t func_ctx = { next_label(self), -1, -1, NULL, -1 };
-    gen_stmts(self, &func_ctx, stmts);
+    gen_stmts(self, stmts);
 
     // Generate exit sequence
-    emit_target(self, func_ctx.return_label);
+    emit_target(self, self->return_label);
     emit(self,
         "\tleave\n"
         "\tret\n");

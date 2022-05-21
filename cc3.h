@@ -681,9 +681,15 @@ void print_stmts(stmt_vec_t *stmts, int indent);
 
 /** Code generation **/
 
-typedef struct gen gen_t;
+typedef struct {
+    int label;
+    int begin;
+    int end;
+} case_t;
 
-struct gen {
+VEC_DEF(case_vec, case_t)
+
+typedef struct gen {
     /** Global state **/
     int out_fd;
     // Next unique label #
@@ -700,9 +706,15 @@ struct gen {
     int fp_offset;
     // Number of active temporaries
     int temp_cnt;
-    // Jump targets for gotos
+
+    // Jump targets
+    int return_label;
+    int break_label;
+    int continue_label;
+    int default_label;
+    case_vec_t *cases;
     map_t gotos;
-};
+} gen_t;
 
 void gen_init(gen_t *self, int out_fd);
 void gen_free(gen_t *self);
