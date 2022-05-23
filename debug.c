@@ -2,10 +2,10 @@
 
 #include "cc3.h"
 
-static void print_members(memb_t *members)
+static void print_members(memb_vec_t *members)
 {
     printf(" { ");
-    for (memb_t *memb = members; memb; memb = memb->next) {
+    VEC_FOREACH(members, memb) {
         print_ty(memb->ty);
         if (memb->name)
             printf(" %s", memb->name);
@@ -39,8 +39,8 @@ void print_ty(ty_t *ty)
             printf("struct %s", ty->as_aggregate.name);
         } else {
             printf("struct");
-            assert(ty->as_aggregate.members);
-            print_members(ty->as_aggregate.members);
+            assert(ty->as_aggregate.had_def);
+            print_members(&ty->as_aggregate.members);
         }
         break;
 
@@ -49,8 +49,8 @@ void print_ty(ty_t *ty)
             printf("union %s", ty->as_aggregate.name);
         } else {
             printf("union");
-            assert(ty->as_aggregate.members);
-            print_members(ty->as_aggregate.members);
+            assert(ty->as_aggregate.had_def);
+            print_members(&ty->as_aggregate.members);
         }
         break;
 
@@ -71,13 +71,11 @@ void print_ty(ty_t *ty)
         print_ty(ty->function.ret_ty);
 
         printf("(");
-        param_t *param = ty->function.params;
-        while (param) {
+        VEC_FOREACH(&ty->function.params, param) {
             print_ty(param->ty);
             if (param->sym)
                 printf(" %s", param->sym->name);
-            if ((param = param->next) || ty->function.var)
-                printf(", ");
+            printf(", ");
         }
         if (ty->function.var)
             printf("...");
@@ -220,7 +218,7 @@ void print_expr(expr_t *expr)
 
     case EXPR_STMT:
         printf("({");
-        print_stmts(expr->as_stmt, 0);
+        print_stmts(&expr->as_stmts, 0);
         printf("})");
         break;
 
@@ -258,9 +256,9 @@ static void iprint(int indent, char *fmt, ...)
     va_end(ap);
 }
 
-void print_stmts(stmt_t *stmt, int indent)
+void print_stmts(stmt_vec_t *stmts, int indent)
 {
-    for (; stmt; stmt = stmt->next) {
+    VEC_FOREACH(stmts, stmt) {
         switch (stmt->kind) {
         case STMT_LABEL:
             iprint(indent, "%s:\n", stmt->as_label.label);
@@ -280,30 +278,28 @@ void print_stmts(stmt_t *stmt, int indent)
             iprint(indent, "if (");
             print_expr(stmt->as_if.cond);
             printf(") {\n");
-            print_stmts(stmt->as_if.then_body, indent + 1);
-            if (stmt->as_if.else_body) {
-                iprint(indent, "} else {\n");
-                print_stmts(stmt->as_if.else_body, indent + 1);
-            }
+            print_stmts(&stmt->as_if.then_body, indent + 1);
+            iprint(indent, "} else {\n");
+            print_stmts(&stmt->as_if.else_body, indent + 1);
             iprint(indent, "}\n");
             break;
         case STMT_SWITCH:
             iprint(indent, "switch (");
             print_expr(stmt->as_switch.cond);
             printf(") {\n");
-            print_stmts(stmt->as_switch.body, indent + 1);
+            print_stmts(&stmt->as_switch.body, indent + 1);
             iprint(indent, "}\n");
             break;
         case STMT_WHILE:
             iprint(indent, "while (");
             print_expr(stmt->as_while.cond);
             printf(") {\n");
-            print_stmts(stmt->as_while.body, indent + 1);
+            print_stmts(&stmt->as_while.body, indent + 1);
             iprint(indent, "}\n");
             break;
         case STMT_DO:
             iprint(indent, "do {\n");
-            print_stmts(stmt->as_do.body, indent + 1);
+            print_stmts(&stmt->as_do.body, indent + 1);
             iprint(indent, "} while (");
             print_expr(stmt->as_do.cond);
             printf(");\n");
@@ -323,7 +319,7 @@ void print_stmts(stmt_t *stmt, int indent)
                 print_expr(stmt->as_for.incr);
             }
             printf(") {\n");
-            print_stmts(stmt->as_for.body, indent + 1);
+            print_stmts(&stmt->as_for.body, indent + 1);
             iprint(indent, "}\n");
             break;
         case STMT_GOTO:

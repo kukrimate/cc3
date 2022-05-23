@@ -137,8 +137,9 @@ static expr_t *expression(cc3_t *self);
 static int constant_expression(cc3_t *self);
 
 static bool is_type_name(cc3_t *self, tk_t *tk);
-static stmt_t *read_block(cc3_t *self);
 static ty_t *type_name(cc3_t *self);
+
+static void compound_statement(cc3_t *self, stmt_vec_t *stmts);
 
 expr_t *primary_expression(cc3_t *self)
 {
@@ -146,38 +147,34 @@ expr_t *primary_expression(cc3_t *self)
     expr_t *expr;
 
     switch (tk->type) {
+    case TK_VA_START:
+        expr = alloc_expr(EXPR_VA_START);
+        expr->ty = &ty_void;
+        want(self, TK_LPAREN);
+        expr->as_unary.arg = assignment_expression(self);
+        want(self, TK_COMMA);
+        // Per C standard we take the last non-variadic parameter as an
+        // argument, however we already know which one it is, so we can
+        // just discard it.
+        assignment_expression(self);
+        want(self, TK_RPAREN);
+        break;
+    case TK_VA_END:
+        expr = alloc_expr(EXPR_VA_END);
+        expr->ty = &ty_void;
+        want(self, TK_LPAREN);
+        expr->as_unary.arg = assignment_expression(self);
+        want(self, TK_RPAREN);
+        break;
+    case TK_VA_ARG:
+        expr = alloc_expr(EXPR_VA_ARG);
+        want(self, TK_LPAREN);
+        expr->as_unary.arg = assignment_expression(self);
+        want(self, TK_COMMA);
+        expr->ty = type_name(self);
+        want(self, TK_RPAREN);
+        break;
     case TK_IDENTIFIER:
-        if (!strcmp(tk_str(tk), "__builtin_va_start")) {
-            expr = alloc_expr(EXPR_VA_START);
-            expr->ty = &ty_void;
-            want(self, TK_LPAREN);
-            expr->as_unary.arg = assignment_expression(self);
-            want(self, TK_COMMA);
-            // Per C standard we take the last non-variadic parameter as an
-            // argument, however we already know which one it is, so we can
-            // just discard it.
-            assignment_expression(self);
-            want(self, TK_RPAREN);
-            break;
-        }
-        if (!strcmp(tk_str(tk), "__builtin_va_end")) {
-            expr = alloc_expr(EXPR_VA_END);
-            expr->ty = &ty_void;
-            want(self, TK_LPAREN);
-            expr->as_unary.arg = assignment_expression(self);
-            want(self, TK_RPAREN);
-            break;
-        }
-        if (!strcmp(tk_str(tk), "__builtin_va_arg")) {
-            expr = alloc_expr(EXPR_VA_ARG);
-            want(self, TK_LPAREN);
-            expr->as_unary.arg = assignment_expression(self);
-            want(self, TK_COMMA);
-            expr->ty = type_name(self);
-            want(self, TK_RPAREN);
-            break;
-        }
-
         expr = make_sym_expr(&self->sema, tk_str(tk));
         break;
     case TK_CONSTANT:
@@ -189,10 +186,12 @@ expr_t *primary_expression(cc3_t *self)
     case TK_LPAREN:
         if (maybe_want(self, TK_LCURLY)) {  // [GNU]: statement expressions
             sema_enter(&self->sema);
-            stmt_t *body = read_block(self);
+            stmt_vec_t stmts;
+            stmt_vec_init(&stmts);
+            compound_statement(self, &stmts);
+            expr = make_stmt_expr(&stmts);
             sema_exit(&self->sema);
             want(self, TK_RPAREN);
-            expr = make_stmt_expr(body);
         } else {
             expr = expression(self);
             want(self, TK_RPAREN);
@@ -539,7 +538,7 @@ static void struct_initializer(cc3_t *self, init_t *out, ty_t *ty)
     init_vec_init(&list);
 
     // Bind an initializer to each member of the struct
-    for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next)
+    VEC_FOREACH(&ty->as_aggregate.members, memb)
         initializer_r(self, init_vec_push(&list), memb->ty, false);
 
     // Return the new initializer list we've built
@@ -553,7 +552,8 @@ static void union_initializer(cc3_t *self, init_t *out, ty_t *ty)
 
     init_vec_t list;
     init_vec_init(&list);
-    initializer_r(self, init_vec_push(&list), ty->as_aggregate.members->ty, false);
+    initializer_r(self, init_vec_push(&list),
+        VEC_AT(&ty->as_aggregate.members, 0)->ty, false);
 
     make_init_list(out, &list);
 }
@@ -666,10 +666,41 @@ static void initializer(cc3_t *self, init_t *out, ty_t *ty)
 static ty_t *declaration_specifiers(cc3_t *self, int *out_sc);
 static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_name);
 
-static memb_t *member_list(cc3_t *self)
+static void pack_member(ty_t *ty, memb_t *memb)
 {
-    memb_t *members = NULL, **tail = &members;
+    if (ty->kind == TY_STRUCT) {    // TY_STRUCT
+        // The highest member alignment becomes the struct's alignment
+        if (memb->ty->align > ty->align)
+            ty->align = memb->ty->align;
+        // Then we align the current size to the member's alignment
+        // and that becomes the member's offset
+        memb->offset = (ty->size = align(ty->size, memb->ty->align));
+        // Finally we increase the size by the member's size
+        ty->size += memb->ty->size;
+    } else {                        // TY_UNION
+        // The highest member alignment becomes the union's alignment
+        if (memb->ty->align > ty->align)
+            ty->align = memb->ty->align;
+        // The highest member size becomes the union's size
+        if (memb->ty->size > ty->size)
+            ty->size = memb->ty->size;
+        // All union members are at offset 0
+        memb->offset = 0;
+    }
+}
 
+static ty_t *aggregate_definition(cc3_t *self, ty_t *ty)
+{
+    // Make sure each aggregate only has one definition
+    if (ty->as_aggregate.had_def)
+        err("Re-definition of aggregate");
+
+    // Mark as defined
+    ty->as_aggregate.had_def = true;
+    // Initialize member list
+    memb_vec_init(&ty->as_aggregate.members);
+
+    // Read members
     do {
         int sc;
         ty_t *base_ty = declaration_specifiers(self, &sc);
@@ -678,78 +709,51 @@ static memb_t *member_list(cc3_t *self)
         if (sc != -1)
             err("Storge class not allowed in struct/union");
 
+        // Append new member
+        // FIXME: add support bitfields
         if (!maybe_want(self, TK_SEMICOLON)) {
             do {
-                /* FIXME: anonymous bitfield
-                if (maybe_want(self, TK_COLON)) {
-                    constant_expression(self);
-                    continue;
-                }*/
-
-                char *name;
-                ty_t *ty = declarator(self, base_ty, false, &name);
-
-                /* FIXME: bitfield
-                if (maybe_want(self, TK_COLON))
-                    constant_expression(self);*/
-
-                *tail = make_memb(ty, name);
-                tail = &(*tail)->next;
-            } while (maybe_want(self, TK_COMMA));   // Another declarator after ,
-            want(self, TK_SEMICOLON);               // Must end with ;
+                memb_t *memb = memb_vec_push(&ty->as_aggregate.members);
+                memb->ty = NULL;
+                memb->name = NULL;
+                memb->ty = declarator(self, base_ty, false, &memb->name);
+                pack_member(ty, memb);
+            } while (maybe_want(self, TK_COMMA));
+            want(self, TK_SEMICOLON);
         } else {
             // [GNU] An anonymous struct/union is allowed as a member
             if (base_ty->kind != TY_STRUCT && base_ty->kind != TY_UNION)
                 err("Invalid anonymous member");
-            *tail = make_memb(base_ty, NULL);
-            tail = &(*tail)->next;
+            memb_t *memb = memb_vec_push(&ty->as_aggregate.members);
+            memb->ty = base_ty;
+            memb->name = NULL;
+            pack_member(ty, memb);
         }
     } while (!maybe_want(self, TK_RCURLY));
 
-    return members;
+    // The size of a struct must be a multiple of its alignment
+    if (ty->kind == TY_STRUCT)
+        ty->size = align(ty->size, ty->align);
+
+    return ty;
 }
 
-static ty_t *struct_specifier(cc3_t *self)
+static ty_t *aggregate_specifier(cc3_t *self, int kind)
 {
     tk_t *tk;
     if ((tk = maybe_want(self, TK_IDENTIFIER))) {
         if (maybe_want(self, TK_LCURLY)) {
             // Tagged struct defintion
-            ty_t *ty = sema_define_tag(&self->sema, TY_STRUCT, tk_str(tk));
-            define_struct(ty, member_list(self));
-            return ty;
+            return aggregate_definition(self,
+                    sema_define_tag(&self->sema, kind, tk_str(tk)));
         } else {
             // Forward struct declaration
-            return sema_forward_declare_tag(&self->sema, TY_STRUCT, tk_str(tk));
+            return sema_forward_declare_tag(&self->sema, kind, tk_str(tk));
         }
     } else {
         // Untagged struct
         want(self, TK_LCURLY);
-        ty_t *ty = make_ty(TY_STRUCT);
-        define_struct(ty, member_list(self));
-        return ty;
-    }
-}
-
-static ty_t *union_specifier(cc3_t *self)
-{
-    tk_t *tk;
-    if ((tk = maybe_want(self, TK_IDENTIFIER))) {
-        if (maybe_want(self, TK_LCURLY)) {
-            // Tagged struct defintion
-            ty_t *ty = sema_define_tag(&self->sema, TY_UNION, tk_str(tk));
-            define_union(ty, member_list(self));
-            return ty;
-        } else {
-            // Forward struct declaration
-            return sema_forward_declare_tag(&self->sema, TY_UNION, tk_str(tk));
-        }
-    } else {
-        // Untagged struct
-        want(self, TK_LCURLY);
-        ty_t *ty = make_ty(TY_UNION);
-        define_union(ty, member_list(self));
-        return ty;
+        return aggregate_definition(self, make_ty(kind));
     }
 }
 
@@ -895,18 +899,24 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
         case TK_STRUCT:
             if (ty || had_ts) goto err_ts;
             adv(self);
-            ty = struct_specifier(self);
+            ty = aggregate_specifier(self, TY_STRUCT);
             continue;
         case TK_UNION:
             if (ty || had_ts) goto err_ts;
             adv(self);
-            ty = union_specifier(self);
+            ty = aggregate_specifier(self, TY_UNION);
             continue;
         case TK_ENUM:
             if (ty || had_ts) goto err_ts;
             adv(self);
             enum_specifier(self);
             ty = &ty_int;
+            continue;
+
+        case TK_VA_LIST:
+            if (ty || had_ts) goto err_ts;
+            adv(self);
+            ty = &ty_va_list;
             continue;
 
         case TK_TYPEOF:
@@ -990,7 +1000,7 @@ struct decl {
 
         struct {
             scope_t *scope;
-            param_t *params;
+            param_vec_t params;
             bool var;
         } as_function;
     };
@@ -1040,15 +1050,18 @@ static decl_t *declarator_r(cc3_t *self)
                 want(self, TK_RSQ);
             }
         } else if (maybe_want(self, TK_LPAREN)) {            // Function
-            decl = make_decl(decl, DECL_FUNCTION);
             sema_enter(&self->sema);
+
+            decl = make_decl(decl, DECL_FUNCTION);
+            param_vec_init(&decl->as_function.params);
+
             if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
                 // "void" as the only unnamed parameter means no parameters
                 adv(self);
                 adv(self);
             } else {
                 // Otherwise a parameter-type-list follows
-                for (param_t **tail = &decl->as_function.params;;) {
+                for (;;) {
                     int sc;
                     ty_t *ty;
                     char *name;
@@ -1071,8 +1084,9 @@ static decl_t *declarator_r(cc3_t *self)
                     if (name)
                         sym = sema_declare(&self->sema, sc, ty, name);
                     // Append parameter to the list
-                    *tail = make_param(ty, sym);
-                    tail = &(*tail)->next;
+                    param_t *param = param_vec_push(&decl->as_function.params);
+                    param->ty = ty;
+                    param->sym = sym;
                     // If there is no comma the end was reached
                     if (!maybe_want(self, TK_COMMA))
                         break;
@@ -1107,7 +1121,7 @@ static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_n
         case DECL_FUNCTION:
             ty = make_function(ty,
                     decl->as_function.scope,
-                    decl->as_function.params,
+                    &decl->as_function.params,
                     decl->as_function.var);
             break;
         default:
@@ -1160,6 +1174,7 @@ static bool is_type_name(cc3_t *self, tk_t *tk)
     case TK_UNION:
     case TK_ENUM:
     case TK_TYPEOF:
+    case TK_VA_LIST:
         return true;
 
     // Might be a typedef name
@@ -1191,13 +1206,7 @@ static ty_t *type_name(cc3_t *self)
 
 /** Statements **/
 
-static inline void append_stmt(stmt_t ***tail, stmt_t *stmt)
-{
-    **tail = stmt;
-    *tail = &(**tail)->next;
-}
-
-static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
+static bool block_scope_declaration(cc3_t *self, stmt_vec_t *stmts)
 {
     int sc;
     ty_t *base_ty = declaration_specifiers(self, &sc);
@@ -1216,13 +1225,15 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
 
             if (sym->kind == SYM_LOCAL) {
                 // Locals are intermixed with code and represented in the AST
-                stmt_t *stmt = make_stmt(STMT_DECL);
+                stmt_t *stmt = stmt_vec_push(stmts);
+                stmt->kind = STMT_DECL;
                 stmt->as_decl.sym = sym;
                 if (maybe_want(self, TK_AS)) {
                     stmt->as_decl.has_init = true;
                     initializer(self, &stmt->as_decl.init, sym->ty);
+                } else {
+                    stmt->as_decl.has_init = false;
                 }
-                append_stmt(tail, stmt);
             } else {
                 if (maybe_want(self, TK_AS)) {
                     // Static initializers get generated in the .data section
@@ -1239,63 +1250,47 @@ static bool block_scope_declaration(cc3_t *self, stmt_t ***tail)
     return true;
 }
 
-static void statement(cc3_t *self, stmt_t ***tail);
-
-static inline void block_item_list(cc3_t *self, stmt_t ***tail)
-{
-    while (!maybe_want(self, TK_RCURLY))
-        if (!block_scope_declaration(self, tail))
-            statement(self, tail);
-}
-
-static inline stmt_t *read_stmt(cc3_t *self)
-{
-    stmt_t *head = NULL, **tail = &head;
-    statement(self, &tail);
-    return head;
-}
-
-void statement(cc3_t *self, stmt_t ***tail)
+static void statement(cc3_t *self, stmt_vec_t *stmts)
 {
     tk_t *tk;
 
     // Statements may be preceeded by labels
-    for (;;) {
+    for (;;)
         if ((tk = peek(self, 0))->type == TK_IDENTIFIER
                 && peek(self, 1)->type == TK_COLON) {
-            stmt_t *stmt = make_stmt(STMT_LABEL);
+            stmt_t *stmt = stmt_vec_push(stmts);
+            stmt->kind = STMT_LABEL;
             stmt->as_label.label = strdup(tk_str(tk));
             adv(self);
             adv(self);
-            append_stmt(tail, stmt);
         } else if (maybe_want(self, TK_CASE)) {
-            stmt_t *stmt = make_stmt(STMT_CASE);
+            stmt_t *stmt = stmt_vec_push(stmts);
+            stmt->kind = STMT_CASE;
             stmt->as_case.begin = constant_expression(self);
             if (maybe_want(self, TK_ELLIPSIS))  // [GNU]: case ranges
                 stmt->as_case.end = constant_expression(self);
             else
                 stmt->as_case.end = stmt->as_case.begin;
             want(self, TK_COLON);
-            append_stmt(tail, stmt);
         } else if (maybe_want(self, TK_DEFAULT)) {
+            stmt_vec_push(stmts)->kind = STMT_DEFAULT;
             want(self, TK_COLON);
-            append_stmt(tail, make_stmt(STMT_DEFAULT));
         } else {
             break;
         }
-    }
 
     // Compound statement
     if (maybe_want(self, TK_LCURLY)) {
         sema_enter(&self->sema);
-        block_item_list(self, tail);
+        compound_statement(self, stmts);
         sema_exit(&self->sema);
         return;
     }
 
     // If statement
     if (maybe_want(self, TK_IF)) {
-        stmt_t *stmt = make_stmt(STMT_IF);
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_IF;
 
         // Heading
         want(self, TK_LPAREN);
@@ -1303,19 +1298,21 @@ void statement(cc3_t *self, stmt_t ***tail)
         want(self, TK_RPAREN);
 
         // Then
-        stmt->as_if.then_body = read_stmt(self);
+        stmt_vec_init(&stmt->as_if.then_body);
+        statement(self, &stmt->as_if.then_body);
 
         // Else
+        stmt_vec_init(&stmt->as_if.else_body);
         if (maybe_want(self, TK_ELSE))
-            stmt->as_if.else_body = read_stmt(self);
+            statement(self, &stmt->as_if.else_body);
 
-        append_stmt(tail, stmt);
         return;
     }
 
     // Switch statement
     if (maybe_want(self, TK_SWITCH)) {
-        stmt_t *stmt = make_stmt(STMT_SWITCH);
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_SWITCH;
 
         // Heading
         want(self, TK_LPAREN);
@@ -1323,15 +1320,15 @@ void statement(cc3_t *self, stmt_t ***tail)
         want(self, TK_RPAREN);
 
         // Body
-        stmt->as_switch.body = read_stmt(self);
-
-        append_stmt(tail, stmt);
+        stmt_vec_init(&stmt->as_switch.body);
+        statement(self, &stmt->as_switch.body);
         return;
     }
 
     // While statement
     if (maybe_want(self, TK_WHILE)) {
-        stmt_t *stmt = make_stmt(STMT_WHILE);
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_WHILE;
 
         // Heading
         want(self, TK_LPAREN);
@@ -1339,18 +1336,19 @@ void statement(cc3_t *self, stmt_t ***tail)
         want(self, TK_RPAREN);
 
         // Body
-        stmt->as_while.body = read_stmt(self);
-
-        append_stmt(tail, stmt);
+        stmt_vec_init(&stmt->as_while.body);
+        statement(self, &stmt->as_while.body);
         return;
     }
 
     // Do ... while statement
     if (maybe_want(self, TK_DO)) {
-        stmt_t *stmt = make_stmt(STMT_DO);
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_DO;
 
         // Body
-        stmt->as_do.body = read_stmt(self);
+        stmt_vec_init(&stmt->as_do.body);
+        statement(self, &stmt->as_do.body);
 
         // Condition
         want(self, TK_WHILE);
@@ -1358,91 +1356,96 @@ void statement(cc3_t *self, stmt_t ***tail)
         stmt->as_do.cond = expression(self);
         want(self, TK_RPAREN);
         want(self, TK_SEMICOLON);
-
-        append_stmt(tail, stmt);
         return;
     }
 
     // For statement
     if (maybe_want(self, TK_FOR)) {
-        stmt_t *stmt = make_stmt(STMT_FOR);
-
         // Heading
         want(self, TK_LPAREN);
 
         // C99: for creates a scope of it's own
         sema_enter(&self->sema);
 
-        if (!block_scope_declaration(self, tail))
+        expr_t *init = NULL, *cond = NULL, *incr = NULL;
+
+        if (!block_scope_declaration(self, stmts))
             if (!maybe_want(self, TK_SEMICOLON)) {
-                stmt->as_for.init = expression(self);
+                init = expression(self);
                 want(self, TK_SEMICOLON);
             }
 
         if (!maybe_want(self, TK_SEMICOLON)) {
-            stmt->as_for.cond = expression(self);
+            cond = expression(self);
             want(self, TK_SEMICOLON);
         }
         if (!maybe_want(self, TK_RPAREN)) {
-            stmt->as_for.incr = expression(self);
+            incr = expression(self);
             want(self, TK_RPAREN);
         }
 
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_FOR;
+        stmt->as_for.init = init;
+        stmt->as_for.cond = cond;
+        stmt->as_for.incr = incr;
+
         // Body
-        stmt->as_for.body = read_stmt(self);
+        stmt_vec_init(&stmt->as_for.body);
+        statement(self, &stmt->as_for.body);
 
         // Exit for scope
         sema_exit(&self->sema);
-
-        append_stmt(tail, stmt);
         return;
     }
 
     // Jumps
     if (maybe_want(self, TK_GOTO)) {
-        stmt_t *stmt = make_stmt(STMT_GOTO);
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_GOTO;
         stmt->as_goto.label = strdup(tk_str(want(self, TK_IDENTIFIER)));
         want(self, TK_SEMICOLON);
-        append_stmt(tail, stmt);
         return;
     }
 
     if (maybe_want(self, TK_CONTINUE)) {
+        stmt_vec_push(stmts)->kind = STMT_CONTINUE;
         want(self, TK_SEMICOLON);
-        append_stmt(tail, make_stmt(STMT_CONTINUE));
         return;
     }
 
     if (maybe_want(self, TK_BREAK)) {
+        stmt_vec_push(stmts)->kind = STMT_BREAK;
         want(self, TK_SEMICOLON);
-        append_stmt(tail, make_stmt(STMT_BREAK));
         return;
     }
 
     if (maybe_want(self, TK_RETURN)) {
-        stmt_t *stmt = make_stmt(STMT_RETURN);
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_RETURN;
         if (!maybe_want(self, TK_SEMICOLON)) {
             stmt->as_return.value = expression(self);
             want(self, TK_SEMICOLON);
+        } else {
+            stmt->as_return.value = NULL;
         }
-        append_stmt(tail, stmt);
         return;
     }
 
     // Expression statement
     if (!maybe_want(self, TK_SEMICOLON)) {
-        stmt_t *stmt = make_stmt(STMT_EVAL);
-        stmt->as_return.value = expression(self);
+        stmt_t *stmt = stmt_vec_push(stmts);
+        stmt->kind = STMT_EVAL;
+        stmt->as_eval.value = expression(self);
         want(self, TK_SEMICOLON);
-        append_stmt(tail, stmt);
     }
 }
 
-static stmt_t *read_block(cc3_t *self)
+static void compound_statement(cc3_t *self, stmt_vec_t *stmts)
 {
-    stmt_t *head = NULL, **tail = &head;
-    block_item_list(self, &tail);
-    return head;
+    while (!maybe_want(self, TK_RCURLY))
+        if (!block_scope_declaration(self, stmts))
+            statement(self, stmts);
 }
 
 static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
@@ -1459,7 +1462,9 @@ static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
 
     // Bring parameters into scope for parsing the function body
     sema_push(&self->sema, ty->function.scope);
-    stmt_t *body = read_block(self);
+    stmt_vec_t stmts;
+    stmt_vec_init(&stmts);
+    compound_statement(self, &stmts);
     sema_exit(&self->sema);
 
     self->sema.func_name = NULL;
@@ -1467,11 +1472,11 @@ static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
 #if 0
     // Dump function body for debugging
     printf("Defined functions %s\n", name);
-    print_stmts(body, 1);
+    print_stmts(&stmts, 1);
 #endif
 
     // Generate code for the function
-    gen_func(&self->gen, sym, body);
+    gen_func(&self->gen, sym, &stmts);
 }
 
 static void external_declaration(cc3_t *self, int sc, ty_t *ty, char *name)

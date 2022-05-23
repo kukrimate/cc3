@@ -11,7 +11,7 @@ files="cc3 gen sema parse lex debug util"
 for file in $files
 do
     echo "Compiling $file (stage 0)"
-    ./cc3 -c -o tmp/$file.o $file.c
+    valgrind ./cc3 -c -o tmp/$file.o $file.c
 done
 
 echo "Linking (stage 0)"

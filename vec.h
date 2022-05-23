@@ -57,6 +57,9 @@ memb_ty *name ## _push(name ## _t *self)                                       \
         (vec)->data + tmp;                                                     \
     })
 
+#define VEC_BEGIN(vec)  ((vec)->data)
+#define VEC_END(vec)    ((vec)->data + (vec)->length)
+
 #define VEC_FOREACH(vec, cur)                                                  \
     for (__typeof__ ((vec)->data) cur = (vec)->data,                           \
             _end = cur + (vec)->length; cur < _end; ++cur)

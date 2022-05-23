@@ -22,6 +22,15 @@
 /** Enforce unreachability **/
 #define ASSERT_NOT_REACHED() assert(0)
 
+/** Move a value to a heap allocation **/
+#define BOX(val)                                        \
+    ({                                                  \
+        __typeof__(val) *ptr = malloc(sizeof val);      \
+        if (!ptr) abort();                              \
+        *ptr = val;                                     \
+        ptr;                                            \
+    })
+
 /** Align (up) val to the nearest multiple of bound **/
 int align(int val, int bound);
 
@@ -141,7 +150,6 @@ enum {
     TK_STRUCT,
     TK_SWITCH,
     TK_TYPEDEF,
-    TK_TYPEOF,
     TK_UNION,
     TK_UNSIGNED,
     TK_VOID,
@@ -150,6 +158,12 @@ enum {
     TK_BOOL,
     TK_COMPLEX,
     TK_IMAGINARY,
+
+    TK_TYPEOF,
+    TK_VA_LIST,
+    TK_VA_START,
+    TK_VA_END,
+    TK_VA_ARG,
 
     TK_IDENTIFIER,
     TK_CONSTANT,
@@ -251,31 +265,20 @@ int lex_next(lexer_t *self, tk_t *tk);
 
 /** Types **/
 
-typedef struct memb memb_t;
-
-struct memb {
-    memb_t *next;
-
+typedef struct {
     ty_t *ty;
     char *name;
-
     int offset;
-};
+} memb_t;
 
-memb_t *make_memb(ty_t *ty, char *name);
-void define_struct(ty_t *ty, memb_t *members);
-void define_union(ty_t *ty, memb_t *members);
+VEC_DEF(memb_vec, memb_t)
 
-typedef struct param param_t;
+typedef struct {
+    ty_t *ty;
+    sym_t *sym;
+} param_t;
 
-struct param {
-    param_t *next;
-
-    ty_t *ty;           // Type of parameter
-    sym_t *sym;         // Corresponding symbol (if named)
-};
-
-param_t *make_param(ty_t *ty, sym_t *sym);
+VEC_DEF(param_vec, param_t)
 
 // Type kinds are a non-overlapping bitflag collection. This allows cheap
 // testing for a group of types.
@@ -329,8 +332,14 @@ struct ty {
 
     union {
         struct {
+            ty_t *elem_ty;
+            int cnt;
+        } array;
+
+        struct {
             char *name;
-            memb_t *members;
+            bool had_def;
+            memb_vec_t members;
         } as_aggregate;
 
         struct {
@@ -338,14 +347,9 @@ struct ty {
         } pointer;
 
         struct {
-            ty_t *elem_ty;
-            int cnt;
-        } array;
-
-        struct {
             ty_t *ret_ty;
             scope_t *scope;
-            param_t *params;
+            param_vec_t params;
             bool var;
         } function;
     };
@@ -367,11 +371,12 @@ extern ty_t ty_float;
 extern ty_t ty_double;
 extern ty_t ty_ldouble;
 extern ty_t ty_bool;
+extern ty_t ty_va_list;
 
 ty_t *make_ty(int kind);
 ty_t *make_pointer(ty_t *base_ty);
 ty_t *make_array(ty_t *elem_ty, int cnt);
-ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var);
+ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_vec_t *params, bool var);
 
 void print_ty(ty_t *ty);
 
@@ -453,6 +458,7 @@ typedef struct expr expr_t;
 typedef struct stmt stmt_t;
 
 VEC_DEF(expr_vec, expr_t *)
+VEC_DEF(stmt_vec, stmt_t)
 
 enum {
     EXPR_SYM,
@@ -541,7 +547,7 @@ struct expr {
             expr_t *arg3;
         } as_trinary;
 
-        stmt_t *as_stmt;
+        stmt_vec_t as_stmts;
     };
 };
 
@@ -586,7 +592,7 @@ expr_t *make_cond_expr(expr_t *cond, expr_t *val1, expr_t *val2);
 expr_t *make_as_expr(expr_t *lhs, expr_t *rhs);
 expr_t *make_seq_expr(expr_t *lhs, expr_t *rhs);
 
-expr_t *make_stmt_expr(stmt_t *body);
+expr_t *make_stmt_expr(stmt_vec_t *stmts);
 
 void print_expr(expr_t *expr);
 
@@ -633,8 +639,6 @@ enum {
 };
 
 struct stmt {
-    stmt_t *next;
-
     int kind;
 
     union {
@@ -649,17 +653,18 @@ struct stmt {
 
         struct {
             expr_t *cond;
-            stmt_t *then_body, *else_body;
+            stmt_vec_t  then_body,
+                        else_body;
         } as_if;
 
         struct {
             expr_t *cond;
-            stmt_t *body;
+            stmt_vec_t  body;
         } as_switch, as_while, as_do;
 
         struct {
             expr_t *init, *cond, *incr;
-            stmt_t *body;
+            stmt_vec_t body;
         } as_for;
 
         struct {
@@ -674,9 +679,7 @@ struct stmt {
     };
 };
 
-stmt_t *make_stmt(int kind);
-
-void print_stmts(stmt_t *stmt, int indent);
+void print_stmts(stmt_vec_t *stmts, int indent);
 
 /** Code generation **/
 
@@ -707,7 +710,7 @@ void gen_init(gen_t *self, int out_fd);
 void gen_free(gen_t *self);
 
 void gen_static(gen_t *self, sym_t *sym, init_t *init);
-void gen_func(gen_t *self, sym_t *sym, stmt_t *body);
+void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts);
 void gen_lits(gen_t *self);
 
 /** Parser **/

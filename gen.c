@@ -145,10 +145,9 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
     case TY_STRUCT:
         assert(init->kind == INIT_LIST);
         int i = 0;
-        for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
+        VEC_FOREACH(&ty->as_aggregate.members, memb) {
+            emit(self, "\t.align\t%d\n", memb->ty->align);
             gen_static_initializer(self, memb->ty, VEC_AT(&init->as_list, i++));
-            if (memb->next)                             // Middle padding
-                emit(self, "\t.align\t%d\n", memb->next->ty->align);
         }
 
         emit(self, "\t.align\t%d\n", ty->align);        // End padding
@@ -157,7 +156,7 @@ static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
     case TY_UNION:
         assert(init->kind == INIT_LIST);
         gen_static_initializer(self,
-            ty->as_aggregate.members->ty,
+            VEC_AT(&ty->as_aggregate.members, 0)->ty,
             VEC_AT(&init->as_list, 0));
         emit(self, "\t.align\t%d\n", ty->align);        // End padding
         break;
@@ -253,7 +252,7 @@ static expr_t *match_unary(expr_t *expr, int kind1, int kind2)
 static void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr);
 static void gen_bool(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr, bool val, int label);
-static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head);
+static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_vec_t *stmts);
 
 void gen_addr(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
 {
@@ -572,7 +571,7 @@ void gen_value(gen_t *self, jmp_ctx_t *jmp_ctx, expr_t *expr)
         break;
 
     case EXPR_STMT:
-        gen_stmts(self, jmp_ctx, expr->as_stmt);
+        gen_stmts(self, jmp_ctx, &expr->as_stmts);
         break;
 
     case EXPR_VA_START:
@@ -707,15 +706,15 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
     case TY_STRUCT:
         assert(init->kind == INIT_LIST);
         int i = 0;
-        for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
+        VEC_FOREACH(&ty->as_aggregate.members, memb) {
             gen_initializer(self, jmp_ctx, memb->ty,
                 offset + memb->offset, VEC_AT(&init->as_list, i++));
         }
         break;
     case TY_UNION:
         assert(init->kind == INIT_LIST);
-        gen_initializer(self, jmp_ctx, ty->as_aggregate.members->ty,
-            offset + ty->as_aggregate.members->offset,
+        memb_t *first = VEC_AT(&ty->as_aggregate.members, 0);
+        gen_initializer(self, jmp_ctx, first->ty, offset + first->offset,
             VEC_AT(&init->as_list, 0));
         break;
     case TY_ARRAY:
@@ -733,9 +732,9 @@ static void gen_initializer(gen_t *self, jmp_ctx_t *jmp_ctx,
     }
 }
 
-static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
+static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_vec_t *stmts)
 {
-    for (; head; head = head->next)
+    VEC_FOREACH(stmts, head)
         switch (head->kind) {
         case STMT_LABEL:
             emit(self, ".L%d:\n", map_goto(self, head->as_label.label));
@@ -755,28 +754,21 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             break;
         case STMT_IF:
         {
-            int lelse = next_label(self);
+            int lelse = next_label(self),
+                lend = next_label(self);
 
             // Generate test
             gen_bool(self, jmp_ctx, head->as_if.cond, false, lelse);
 
             // Generate then
-            gen_stmts(self, jmp_ctx, head->as_if.then_body);
+            gen_stmts(self, jmp_ctx, &head->as_if.then_body);
+            emit_jump(self, "jmp", lend);
 
-            if (head->as_if.else_body) {
-                // If there is an else, create a jump to the end after the then
-                int lend = next_label(self);
-                emit_jump(self, "jmp", lend);
-                // Now we can generate the else body (with its target)
-                emit_target(self, lelse);
-                gen_stmts(self, jmp_ctx, head->as_if.else_body);
-                // Add new jump target for end
-                emit_target(self, lend);
-            } else {
-                // If there is no else, we just use the else label as the end
-                emit_target(self, lelse);
-            }
+            // Generate else
+            emit_target(self, lelse);
+            gen_stmts(self, jmp_ctx, &head->as_if.else_body);
 
+            emit_target(self, lend);
             break;
         }
         case STMT_SWITCH:
@@ -797,7 +789,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             emit_jump(self, "jmp", ladder_label);
 
             // Generate body
-            gen_stmts(self, &switch_ctx, head->as_switch.body);
+            gen_stmts(self, &switch_ctx, &head->as_switch.body);
             emit_jump(self, "jmp", switch_ctx.break_label);
 
             // Generate selection ladder
@@ -840,7 +832,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
             gen_bool(self, jmp_ctx, head->as_while.cond, false, loop_ctx.break_label);
 
             // Generate body
-            gen_stmts(self, &loop_ctx, head->as_while.body);
+            gen_stmts(self, &loop_ctx, &head->as_while.body);
 
             // Jump back to test
             emit_jump(self, "jmp", loop_ctx.continue_label);
@@ -859,7 +851,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
 
             // Generate continue target and body
             emit_target(self, loop_ctx.continue_label);
-            gen_stmts(self, &loop_ctx, head->as_do.body);
+            gen_stmts(self, &loop_ctx, &head->as_do.body);
 
             // Generate test
             gen_bool(self, jmp_ctx, head->as_do.cond, true, loop_ctx.continue_label);
@@ -887,7 +879,7 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
                 gen_bool(self, jmp_ctx, head->as_for.cond, false, loop_ctx.break_label);
 
             // Generate body and increment
-            gen_stmts(self, &loop_ctx, head->as_for.body);
+            gen_stmts(self, &loop_ctx, &head->as_for.body);
 
             emit_target(self, loop_ctx.continue_label);
             if (head->as_for.incr)
@@ -914,6 +906,8 @@ static void gen_stmts(gen_t *self, jmp_ctx_t *jmp_ctx, stmt_t *head)
         case STMT_RETURN:
             if (head->as_return.value)
                 gen_value(self, jmp_ctx, head->as_return.value);
+            else
+                head->as_return.value = NULL;
             emit_jump(self, "jmp", jmp_ctx->return_label);
             break;
         case STMT_DECL:
@@ -967,7 +961,7 @@ static void gen_param_spill(gen_t *self, ty_t *ty, int offset, int i)
     }
 }
 
-void gen_func(gen_t *self, sym_t *sym, stmt_t *body)
+void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
 {
     emit(self, "\t.text\n");
     if (sym->kind != SYM_STATIC)
@@ -1003,7 +997,7 @@ void gen_func(gen_t *self, sym_t *sym, stmt_t *body)
     // Spill named parameters
     int gp = 0, oflo = 16;
 
-    for (param_t *param = sym->ty->function.params; param; param = param->next)
+    VEC_FOREACH(&sym->ty->function.params, param)
         if (gp < 6) {
             self->offset += param->ty->size;
             self->offset = align(self->offset, param->ty->align);
@@ -1031,7 +1025,7 @@ void gen_func(gen_t *self, sym_t *sym, stmt_t *body)
 
     // Generate body
     jmp_ctx_t func_ctx = { next_label(self), -1, -1, NULL, -1 };
-    gen_stmts(self, &func_ctx, body);
+    gen_stmts(self, &func_ctx, stmts);
 
     // Generate exit sequence
     emit_target(self, func_ctx.return_label);

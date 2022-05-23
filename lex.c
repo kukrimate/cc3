@@ -81,6 +81,7 @@ static bool match(lexer_t *self, tk_t *tk, int want)
 
 static int check_keyword(const char *spelling)
 {
+    // Standard keywords
     if (!strcmp(spelling, "auto"))          return TK_AUTO;
     if (!strcmp(spelling, "break"))         return TK_BREAK;
     if (!strcmp(spelling, "case"))          return TK_CASE;
@@ -98,7 +99,6 @@ static int check_keyword(const char *spelling)
     if (!strcmp(spelling, "goto"))          return TK_GOTO;
     if (!strcmp(spelling, "if"))            return TK_IF;
     if (!strcmp(spelling, "inline"))        return TK_INLINE;
-    if (!strcmp(spelling, "__inline"))      return TK_INLINE;   // [GNU]
     if (!strcmp(spelling, "int"))           return TK_INT;
     if (!strcmp(spelling, "long"))          return TK_LONG;
     if (!strcmp(spelling, "register"))      return TK_REGISTER;
@@ -111,7 +111,6 @@ static int check_keyword(const char *spelling)
     if (!strcmp(spelling, "struct"))        return TK_STRUCT;
     if (!strcmp(spelling, "switch"))        return TK_SWITCH;
     if (!strcmp(spelling, "typedef"))       return TK_TYPEDEF;
-    if (!strcmp(spelling, "__typeof__"))    return TK_TYPEOF;
     if (!strcmp(spelling, "union"))         return TK_UNION;
     if (!strcmp(spelling, "unsigned"))      return TK_UNSIGNED;
     if (!strcmp(spelling, "void"))          return TK_VOID;
@@ -120,6 +119,15 @@ static int check_keyword(const char *spelling)
     if (!strcmp(spelling, "_Bool"))         return TK_BOOL;
     if (!strcmp(spelling, "_Complex"))      return TK_COMPLEX;
     if (!strcmp(spelling, "_Imaginary"))    return TK_IMAGINARY;
+
+    // Extensions
+    if (!strcmp(spelling, "__inline"))              return TK_INLINE;
+    if (!strcmp(spelling, "__typeof__"))            return TK_TYPEOF;
+    if (!strcmp(spelling, "__builtin_va_list"))     return TK_VA_LIST;
+    if (!strcmp(spelling, "__builtin_va_start"))    return TK_VA_START;
+    if (!strcmp(spelling, "__builtin_va_end"))      return TK_VA_END;
+    if (!strcmp(spelling, "__builtin_va_arg"))      return TK_VA_ARG;
+
     return TK_IDENTIFIER;
 }
 

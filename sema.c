@@ -19,63 +19,18 @@ ty_t ty_llong   = { TY_LLONG,   8,      8,      };
 ty_t ty_ullong  = { TY_ULLONG,  8,      8,      };
 ty_t ty_float   = { TY_FLOAT,   4,      4,      };
 ty_t ty_double  = { TY_DOUBLE,  8,      8,      };
-ty_t ty_ldouble = { TY_LDOUBLE, 16,     16,     };
+ty_t ty_ldouble = { TY_LDOUBLE, 16,     16      };
 
-memb_t *make_memb(ty_t *ty, char *name)
-{
-    memb_t *memb = calloc(1, sizeof *memb);
-    if (!memb) abort();
-    memb->ty = ty;
-    memb->name = name;
-    return memb;
-}
+// va_list type, as defined by the SysV AMD64 ABI
 
-void define_struct(ty_t *ty, memb_t *members)
-{
-    if (ty->as_aggregate.members)
-        err("Re-definition of struct");
+// typedef struct {
+//     unsigned int gp_offset;
+//     unsigned int fp_offset;
+//     void *overflow_arg_area;
+//     void *reg_save_area;
+// } va_list[1];
 
-    ty->as_aggregate.members = members;
-
-    for (memb_t *memb = members; memb; memb = memb->next) {
-        // The highest member alignment becomes the struct's alignment
-        if (memb->ty->align > ty->align)
-            ty->align = memb->ty->align;
-        // Then we align the current size to the member's alignment
-        // and that becomes the member's offset
-        memb->offset = (ty->size = align(ty->size, memb->ty->align));
-        // Finally we increase the size by the member's size
-        ty->size += memb->ty->size;
-    }
-    // The struct's size must be aligned to be a multiple f it's alignment
-    ty->size = align(ty->size, ty->align);
-}
-
-void define_union(ty_t *ty, memb_t *members)
-{
-    if (ty->as_aggregate.members)
-        err("Re-definition of union");
-
-    ty->as_aggregate.members = members;
-
-    for (memb_t *memb = members; memb; memb = memb->next) {
-        // The highest member alignment becomes the union's alignment
-        if (memb->ty->align > ty->align)
-            ty->align = memb->ty->align;
-        // The highest member size becomes the union's size
-        if (memb->ty->size > ty->size)
-            ty->size = memb->ty->size;
-    }
-}
-
-param_t *make_param(ty_t *ty, sym_t *sym)
-{
-    param_t *param = calloc(1, sizeof *param);
-    if (!param) abort();
-    param->ty = ty;
-    param->sym = sym;
-    return param;
-}
+ty_t ty_va_list = { TY_ARRAY, 8, 24, {{ &ty_void, 1 }} };
 
 ty_t *make_ty(int kind)
 {
@@ -100,8 +55,8 @@ ty_t *make_array(ty_t *elem_ty, int cnt)
         err("Array of void");
     if (elem_ty->kind == TY_ARRAY && elem_ty->array.cnt == -1)
         err("Array of incomplete array %T", elem_ty);
-    if (elem_ty->kind == TY_STRUCT || elem_ty->kind == TY_STRUCT)
-        if (!elem_ty->as_aggregate.members)
+    if (elem_ty->kind & (TY_STRUCT | TY_UNION))
+        if (!elem_ty->as_aggregate.had_def)
             err("Array of incomplete aggregate %T", elem_ty);
     if (elem_ty->kind == TY_FUNCTION)
         err("Array cannot contain function %T", elem_ty);
@@ -116,12 +71,12 @@ ty_t *make_array(ty_t *elem_ty, int cnt)
     return ty;
 }
 
-ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var)
+ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_vec_t *params, bool var)
 {
     if (ret_ty->kind == TY_ARRAY)
         err("Function returning array %T", ret_ty);
-    if (ret_ty->kind == TY_STRUCT || ret_ty->kind == TY_STRUCT)
-        if (!ret_ty->as_aggregate.members)
+    if (ret_ty->kind & (TY_STRUCT | TY_UNION))
+        if (!ret_ty->as_aggregate.had_def)
             err("Function returning incomplete aggregate %T", ret_ty);
     if (ret_ty->kind == TY_FUNCTION)
         err("Function returning function %T", ret_ty);
@@ -129,7 +84,7 @@ ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_t *params, bool var)
     ty_t *ty = make_ty(TY_FUNCTION);
     ty->function.ret_ty = ret_ty;
     ty->function.scope = scope;
-    ty->function.params = params;
+    ty->function.params = *params;
     ty->function.var = var;
     return ty;
 }
@@ -185,13 +140,15 @@ bool compare_ty(ty_t *ty1, ty_t *ty2, bool permit_void_ptr)
             return false;
         if (ty1->function.var != ty2->function.var)
             return false;
+        if (ty1->function.params.length != ty2->function.params.length)
+            return false;
         if (!compare_ty(ty1->function.ret_ty, ty2->function.ret_ty, false))
             return false;
-        param_t *p1 = ty1->function.params, *p2 = ty2->function.params;
-        for (; p1 && p2; p1 = p1->next, p2 = p2->next)
-            if (!compare_ty(p1->ty, p2->ty, false))
+        for (int i = 0; i < ty1->function.params.length; ++i)
+            if (!compare_ty(VEC_AT(&ty1->function.params, i)->ty,
+                            VEC_AT(&ty2->function.params, i)->ty, false))
                 return false;
-        return !p1 && !p2;
+        return true;
 
     default:
         ASSERT_NOT_REACHED();
@@ -202,32 +159,7 @@ void sema_init(sema_t *self)
 {
     self->scope = NULL;
     sema_enter(self);
-
     self->block_static_cnt = 0;
-
-    // Declare va_list type, this is defined by the SysV AMD64 ABI
-
-    // typedef struct {
-    //     unsigned int gp_offset;
-    //     unsigned int fp_offset;
-    //     void *overflow_arg_area;
-    //     void *reg_save_area;
-    // } va_list[1];
-
-    ty_t *va_list_struct = make_ty(TY_STRUCT);
-    memb_t *memb, **tail = &memb;
-    *tail = make_memb(&ty_uint, "gp_offset");
-    tail = &(*tail)->next;
-    *tail = make_memb(&ty_uint, "fp_offset");
-    tail = &(*tail)->next;
-    *tail = make_memb(make_pointer(&ty_void), "overflow_arg_area");
-    tail = &(*tail)->next;
-    *tail = make_memb(make_pointer(&ty_void), "reg_save_area");
-    define_struct(va_list_struct, memb);
-
-    sema_declare(self, TK_TYPEDEF,
-        make_array(va_list_struct, 1),
-        strdup("__builtin_va_list"));
 }
 
 void sema_free(sema_t *self)
@@ -527,12 +459,11 @@ static int find_memb(ty_t *ty, const char *name, ty_t **out)
     if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
         return -1;
 
-    for (memb_t *memb = ty->as_aggregate.members; memb; memb = memb->next) {
+    VEC_FOREACH(&ty->as_aggregate.members, memb) {
         if (!memb->name) {
             int result = find_memb(memb->ty, name, out);
-            if (result != -1) {
+            if (result != -1)
                 return memb->offset + result;
-            }
         } else if (!strcmp(memb->name, name)) {
             *out = memb->ty;
             return memb->offset;
@@ -570,12 +501,13 @@ expr_t *make_call_expr(expr_t *func, expr_vec_t *args)
 
 
     // Convert the arguments to the type of the corresponding parameters
-    param_t *param = func_ty->function.params;
+    param_t *param = VEC_BEGIN(&func_ty->function.params),
+            *end_param = VEC_END(&func_ty->function.params);
+
     VEC_FOREACH(args, arg)
-        if (param) {
+        if (param < end_param) {
             // Function arguments get converted "as if by assignment"
-            *arg = convert_by_assignment(param->ty, pointer_conv(*arg));
-            param = param->next;
+            *arg = convert_by_assignment(param++->ty, pointer_conv(*arg));
         } else if (func_ty->function.var) {
             // Variable arguments get the "default argument promotions"
             if ((*arg)->ty->kind & TY_PROMOTE_MASK)
@@ -585,7 +517,7 @@ expr_t *make_call_expr(expr_t *func, expr_vec_t *args)
         } else {
             err("Too many arguments for %T", func_ty);
         }
-    if (param)
+    if (param < end_param)
         err("Not enough arguments for %T", func_ty);
 
     expr_t *expr = alloc_expr(EXPR_CALL);
@@ -1447,21 +1379,18 @@ expr_t *make_seq_expr(expr_t *lhs, expr_t *rhs)
     return expr;
 }
 
-expr_t *make_stmt_expr(stmt_t *body)
+expr_t *make_stmt_expr(stmt_vec_t *stmts)
 {
+    ty_t *ty = &ty_void;
+    if (stmts->length > 0) {
+        stmt_t *stmt = VEC_AT(stmts, stmts->length - 1);
+        if (stmt->kind == STMT_EVAL)
+            ty = stmt->as_eval.value->ty;
+    }
+
     expr_t *expr = alloc_expr(EXPR_STMT);
-
-    // Get the type of the last eval (or void)
-    stmt_t *last = body;
-    while (last->next)
-        last = last->next;
-
-    if (last && last->kind == STMT_EVAL)
-        expr->ty = last->as_eval.value->ty;
-    else
-        expr->ty = &ty_void;
-
-    expr->as_stmt = body;
+    expr->ty = ty;
+    expr->as_stmts = *stmts;
     return expr;
 }
 
