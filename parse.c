@@ -29,10 +29,6 @@ static void cc3_init(cc3_t *self, int in_fd, int out_fd)
     lex_init(&self->lexer, in_fd);
     self->tk_pos = 0;
     self->tk_cnt = 0;
-    for (int i = 0; i < LOOKAHEAD_CNT; ++i) {
-        string_init(&self->tk_buf[i].spelling);
-        string_init(&self->tk_buf[i].str);
-    }
     sema_init(&self->sema);
     gen_init(&self->gen, out_fd);
 }
@@ -40,10 +36,6 @@ static void cc3_init(cc3_t *self, int in_fd, int out_fd)
 static void cc3_free(cc3_t *self)
 {
     lex_free(&self->lexer);
-    for (int i = 0; i < LOOKAHEAD_CNT; ++i) {
-        string_free(&self->tk_buf[i].spelling);
-        string_init(&self->tk_buf[i].str);
-    }
     sema_free(&self->sema);
     gen_free(&self->gen);
 }
@@ -81,19 +73,19 @@ static inline tk_t *next(cc3_t *self)
     return tk;
 }
 
-static inline tk_t *want(cc3_t *self, int want_type)
+static inline tk_t *want(cc3_t *self, int want_kind)
 {
     tk_t *tk = peek(self, 0);
-    if (tk->type != want_type)
+    if (tk->kind != want_kind)
         err("Unexpected token %t", tk);
     adv(self);
     return tk;
 }
 
-static inline tk_t *maybe_want(cc3_t *self, int want_type)
+static inline tk_t *maybe_want(cc3_t *self, int want_kind)
 {
     tk_t *tk = peek(self, 0);
-    if (tk->type == want_type) {
+    if (tk->kind == want_kind) {
         adv(self);
         return tk;
     }
@@ -146,7 +138,7 @@ expr_t *primary_expression(cc3_t *self)
     tk_t *tk = next(self);
     expr_t *expr;
 
-    switch (tk->type) {
+    switch (tk->kind) {
     case TK_VA_START:
         expr = alloc_expr(EXPR_VA_START);
         expr->ty = &ty_void;
@@ -181,7 +173,7 @@ expr_t *primary_expression(cc3_t *self)
         expr = make_const_expr(&ty_int, tk->val);
         break;
     case TK_STR_LIT:
-        expr = make_str_expr(strdup(tk->str.data));
+        expr = make_str_expr(tk->str);
         break;
     case TK_LPAREN:
         if (maybe_want(self, TK_LCURLY)) {  // [GNU]: statement expressions
@@ -228,13 +220,11 @@ expr_t *postfix_expression(cc3_t *self)
             continue;
         }
         if (maybe_want(self, TK_DOT)) {
-            const char *name = tk_str(want(self, TK_IDENTIFIER));
-            expr = make_memb_expr(expr, name);
+            expr = make_memb_expr(expr, tk_str(want(self, TK_IDENTIFIER)));
             continue;
         }
         if (maybe_want(self, TK_ARROW)) {
-            const char *name = tk_str(want(self, TK_IDENTIFIER));
-            expr = make_memb_expr(make_dref_expr(expr), name);
+            expr = make_memb_expr(make_dref_expr(expr), tk_str(want(self, TK_IDENTIFIER)));
             continue;
         }
         if (maybe_want(self, TK_INCR)) {
@@ -275,7 +265,7 @@ expr_t *unary_expression(cc3_t *self)
         return make_lnot_expr(cast_expression(self));
     } else if (maybe_want(self, TK_SIZEOF)) {
         ty_t *ty;
-        if (peek(self, 0)->type == TK_LPAREN && is_type_name(self, peek(self, 1))) {
+        if (peek(self, 0)->kind == TK_LPAREN && is_type_name(self, peek(self, 1))) {
             // sizeof '(' type-name ')'
             adv(self);
             ty = type_name(self);
@@ -292,7 +282,7 @@ expr_t *unary_expression(cc3_t *self)
 
 expr_t *cast_expression(cc3_t *self)
 {
-    if (peek(self, 0)->type == TK_LPAREN && is_type_name(self, peek(self, 1))) {
+    if (peek(self, 0)->kind == TK_LPAREN && is_type_name(self, peek(self, 1))) {
         // '(' type-name ')' cast-expression
         adv(self);
         ty_t *ty = type_name(self);
@@ -480,7 +470,7 @@ static void scalar_initialzier(cc3_t *self, init_t *out, ty_t *ty)
 {
     // If we reach a member of an aggregate without an initializer, we need to
     // zero initialize it. We make that explicit to simplify code generation.
-    if (peek(self, 0)->type == TK_RCURLY)
+    if (peek(self, 0)->kind == TK_RCURLY)
         return make_init_expr(out, ty, make_const_expr(&ty_int, 0));
 
     if (maybe_want(self, TK_LCURLY)) {
@@ -507,8 +497,9 @@ static bool string_array_initializer(cc3_t *self, init_t *out, ty_t *ty)
         return false;
 
     // The string literal might complete the array's type
+    size_t str_len = strlen(tk->str);
     if (ty->array.cnt == -1) {
-        int cnt = tk->str.length + 1;
+        int cnt = str_len + 1;
         ty->align = ty->array.elem_ty->align;
         ty->size = ty->array.elem_ty->size * cnt;
         ty->array.cnt = cnt;
@@ -519,9 +510,9 @@ static bool string_array_initializer(cc3_t *self, init_t *out, ty_t *ty)
     init_vec_init(&list);
 
     for (int i = 0; i < ty->array.cnt; ++i)
-        if (i < tk->str.length)
+        if (i < str_len)
             make_init_expr(init_vec_push(&list), ty->array.elem_ty,
-                make_const_expr(&ty_char, tk->str.data[i]));
+                make_const_expr(&ty_char, tk->str[i]));
         else
             make_init_expr(init_vec_push(&list), ty->array.elem_ty,
                 make_const_expr(&ty_char, 0));
@@ -566,7 +557,7 @@ static void array_initializer(cc3_t *self, init_t *out, ty_t *ty)
     if (ty->array.cnt == -1) {
         // Bind as many initializers as we can, and count them
         int cnt;
-        for (cnt = 0; peek(self, 0)->type != TK_RCURLY; ++cnt)
+        for (cnt = 0; peek(self, 0)->kind != TK_RCURLY; ++cnt)
             initializer_r(self, init_vec_push(&list), ty->array.elem_ty, false);
 
         // Then complete the array type with the number of entries
@@ -664,7 +655,7 @@ static void initializer(cc3_t *self, init_t *out, ty_t *ty)
 /** Declarations **/
 
 static ty_t *declaration_specifiers(cc3_t *self, int *out_sc);
-static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_name);
+static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, const char **out_name);
 
 static void pack_member(ty_t *ty, memb_t *memb)
 {
@@ -763,7 +754,7 @@ static void enumerator_list(cc3_t *self)
 
     do {
         // Read enumerator name
-        char *name = strdup(tk_str(want(self, TK_IDENTIFIER)));
+        const char *name = tk_str(want(self, TK_IDENTIFIER));
         // Optionally there might be a value
         if (maybe_want(self, TK_AS))
             cur = constant_expression(self);
@@ -851,7 +842,7 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
         tk_t *tk = peek(self, 0);
 
         // Match token
-        switch (tk->type) {
+        switch (tk->kind) {
 
         // Storage class
         case TK_TYPEDEF:
@@ -860,7 +851,7 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
         case TK_AUTO:
         case TK_REGISTER:
             if (*out_sc != -1) goto err_sc;
-            *out_sc = tk->type;
+            *out_sc = tk->kind;
             break;
 
         // Type qualifier
@@ -966,7 +957,7 @@ ty_t *declaration_specifiers(cc3_t *self, int *out_sc)
 static void type_qualifier_list(cc3_t *self)
 {
     for (;;)
-        switch (peek(self, 0)->type) {
+        switch (peek(self, 0)->kind) {
         case TK_CONST:
         case TK_RESTRICT:
         case TK_VOLATILE:
@@ -992,7 +983,7 @@ struct decl {
     int kind;
 
     union {
-        char *as_name;
+        const char *as_name;
 
         struct {
             int cnt;
@@ -1032,7 +1023,7 @@ static decl_t *declarator_r(cc3_t *self)
         want(self, TK_RPAREN);
     } else if ((tk = maybe_want(self, TK_IDENTIFIER))) {    // IDENTIFIER
         decl = make_decl(NULL, DECL_NAME);
-        decl->as_name = strdup(tk_str(tk));
+        decl->as_name = tk_str(tk);
     } else {                                                // Abstract
         decl = NULL;
     }
@@ -1055,7 +1046,7 @@ static decl_t *declarator_r(cc3_t *self)
             decl = make_decl(decl, DECL_FUNCTION);
             param_vec_init(&decl->as_function.params);
 
-            if (peek(self, 0)->type == TK_VOID && peek(self, 1)->type == TK_RPAREN) {
+            if (peek(self, 0)->kind == TK_VOID && peek(self, 1)->kind == TK_RPAREN) {
                 // "void" as the only unnamed parameter means no parameters
                 adv(self);
                 adv(self);
@@ -1064,7 +1055,7 @@ static decl_t *declarator_r(cc3_t *self)
                 for (;;) {
                     int sc;
                     ty_t *ty;
-                    char *name;
+                    const char *name;
                     if (!(ty = declaration_specifiers(self, &sc)))
                         err("Expected declaration instead of %t", peek(self, 0));
                     ty = declarator(self, ty, true, &name);
@@ -1104,7 +1095,7 @@ static decl_t *declarator_r(cc3_t *self)
         }
 }
 
-static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_name)
+static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, const char **out_name)
 {
     // Iterate declarators until we reach a name
     for (decl_t *decl = declarator_r(self); decl; decl = decl->next)
@@ -1140,7 +1131,7 @@ static ty_t *declarator(cc3_t *self, ty_t *ty, bool allow_abstract, char **out_n
 
 static bool is_type_name(cc3_t *self, tk_t *tk)
 {
-    switch (tk->type) {
+    switch (tk->kind) {
 
     // Storage class
     case TK_TYPEDEF:
@@ -1196,7 +1187,7 @@ static ty_t *type_name(cc3_t *self)
     if (sc != -1)
         err("No storage class allowed");
 
-    char *name;
+    const char *name;
     ty = declarator(self, ty, true, &name);
     if (name)
         err("Only abstract declarators are allowed");
@@ -1217,7 +1208,7 @@ static bool block_scope_declaration(cc3_t *self, stmt_vec_t *stmts)
     if (!maybe_want(self, TK_SEMICOLON)) {
         do {
             // Read declarator
-            char *name;
+            const char *name;
             ty_t *ty = declarator(self, base_ty, false, &name);
 
             // Trigger semantic action
@@ -1256,11 +1247,11 @@ static void statement(cc3_t *self, stmt_vec_t *stmts)
 
     // Statements may be preceeded by labels
     for (;;)
-        if ((tk = peek(self, 0))->type == TK_IDENTIFIER
-                && peek(self, 1)->type == TK_COLON) {
+        if ((tk = peek(self, 0))->kind == TK_IDENTIFIER
+                && peek(self, 1)->kind == TK_COLON) {
             stmt_t *stmt = stmt_vec_push(stmts);
             stmt->kind = STMT_LABEL;
-            stmt->as_label.label = strdup(tk_str(tk));
+            stmt->as_label.label = tk_str(tk);
             adv(self);
             adv(self);
         } else if (maybe_want(self, TK_CASE)) {
@@ -1403,7 +1394,7 @@ static void statement(cc3_t *self, stmt_vec_t *stmts)
     if (maybe_want(self, TK_GOTO)) {
         stmt_t *stmt = stmt_vec_push(stmts);
         stmt->kind = STMT_GOTO;
-        stmt->as_goto.label = strdup(tk_str(want(self, TK_IDENTIFIER)));
+        stmt->as_goto.label = tk_str(want(self, TK_IDENTIFIER));
         want(self, TK_SEMICOLON);
         return;
     }
@@ -1448,7 +1439,7 @@ static void compound_statement(cc3_t *self, stmt_vec_t *stmts)
             statement(self, stmts);
 }
 
-static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
+static void function_definition(cc3_t *self, int sc, ty_t *ty, const char *name)
 {
     // Make sure it is really a function
     if (ty->kind != TY_FUNCTION)
@@ -1479,7 +1470,7 @@ static void function_definition(cc3_t *self, int sc, ty_t *ty, char *name)
     gen_func(&self->gen, sym, &stmts);
 }
 
-static void external_declaration(cc3_t *self, int sc, ty_t *ty, char *name)
+static void external_declaration(cc3_t *self, int sc, ty_t *ty, const char *name)
 {
     sym_t *sym = sema_declare(&self->sema, sc, ty, name);
 
@@ -1501,7 +1492,7 @@ static void translation_unit(cc3_t *self)
         if (maybe_want(self, TK_SEMICOLON))                 // No names declared
             continue;
 
-        char *name;
+        const char *name;
         ty_t *ty = declarator(self, base_ty, false, &name);
 
         if (maybe_want(self, TK_LCURLY)) {                  // function-definition
@@ -1509,7 +1500,7 @@ static void translation_unit(cc3_t *self)
         } else {                                            // external-declaration
             external_declaration(self, sc, ty, name);
             while (maybe_want(self, TK_COMMA)) {
-                char *name;
+                const char *name;
                 ty_t *ty = declarator(self, base_ty, false, &name);
                 external_declaration(self, sc, ty, name);
             }

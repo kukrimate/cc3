@@ -326,7 +326,8 @@ entry_t *map_find_or_insert(map_t *self, const char *key, bool *found)
         break;
     case ENTRY_ACTIVE:
         // Return maching entry
-        *found = true;
+        if (found)
+            *found = true;
         return entry;
     case ENTRY_DELETED:
         // Re-using deleted entry: count increases, load stays the same
@@ -334,7 +335,8 @@ entry_t *map_find_or_insert(map_t *self, const char *key, bool *found)
         break;
     }
 
-    *found = false;
+    if (found)
+        *found = false;
     entry->state = ENTRY_ACTIVE;
     entry->hash = hash;
     entry->key = key;

@@ -225,19 +225,24 @@ typedef struct tk tk_t;
 typedef unsigned long long val_t;
 
 struct tk {
-    int type;
+    unsigned char kind;
+
     // Location in the source file
     size_t line, col;
+
     // Spelling in the source file
-    string_t spelling;
-    // Semantic value (based on type)
-    val_t val;      // TK_CONSTANT
-    string_t str;   // TK_STR_LIT
+    const char *spelling;
+
+    // Semantic value (based on kind)
+    union {
+        val_t val;          // TK_CONSTANT
+        const char *str;    // TK_STR_LIT
+    };
 };
 
 static inline const char *tk_str(tk_t *tk)
 {
-    return tk->spelling.data;
+    return tk->spelling;
 }
 
 /** Lexer **/
@@ -256,18 +261,24 @@ struct lexer {
 
     // Current position in the input
     size_t line, col;
+
+    // Token spelling buffer
+    string_t spelling;
+
+    // String literal decoding buffer
+    string_t decode;
 };
 
 void lex_init(lexer_t *self, int in_fd);
 void lex_free(lexer_t *self);
-int lex_next(lexer_t *self, tk_t *tk);
+void lex_next(lexer_t *self, tk_t *tk);
 
 
 /** Types **/
 
 typedef struct {
     ty_t *ty;
-    char *name;
+    const char *name;
     int offset;
 } memb_t;
 
@@ -337,7 +348,7 @@ struct ty {
         } array;
 
         struct {
-            char *name;
+            const char *name;
             bool had_def;
             memb_vec_t members;
         } as_aggregate;
@@ -396,10 +407,10 @@ struct sym {
 
     // Declared type and name
     ty_t *ty;
-    char *name;
+    const char *name;
 
     // Assembler symbol name
-    char *asm_name;
+    const char *asm_name;
 
     // Offset of the storage on the stack (for SYM_LOCAL)
     int offset;
@@ -436,9 +447,9 @@ void sema_push(sema_t *self, scope_t *scope);
 scope_t *sema_pop(sema_t *self);
 
 // Declare a name
-sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name);
+sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, const char *name);
 // Declare an enumeration constant
-sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val);
+sym_t *sema_declare_enum_const(sema_t *self, const char *name, val_t val);
 // Lookup a declaration in any scope
 sym_t *sema_lookup(sema_t *self, const char *name);
 // Lookup a name in any scope, if it is a typedef, return its type
@@ -516,12 +527,12 @@ struct expr {
         } as_const;
 
         struct {
-            char *data;
+            const char *data;
         } as_str;
 
         struct {
             expr_t *aggr;
-            char *name;
+            const char *name;
             int offset;
         } as_memb;
 
@@ -553,7 +564,7 @@ expr_t *alloc_expr(int kind);
 
 expr_t *make_sym_expr(sema_t *self, const char *name);
 expr_t *make_const_expr(ty_t *ty, val_t value);
-expr_t *make_str_expr(char *data);
+expr_t *make_str_expr(const char *data);
 
 expr_t *make_memb_expr(expr_t *aggr, const char *name);
 expr_t *make_call_expr(expr_t *func, expr_vec_t *args);
@@ -641,7 +652,7 @@ struct stmt {
 
     union {
         struct {
-            char *label;
+            const char *label;
         } as_label, as_goto;
 
         struct {

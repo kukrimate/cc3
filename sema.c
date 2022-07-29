@@ -211,7 +211,7 @@ static int sym_kind(sema_t *self, int sc)
     }
 }
 
-sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
+sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, const char *name)
 {
     // debugln("Declare %s: %T", name, ty);
 
@@ -270,7 +270,7 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, char *name)
     return sym;
 }
 
-sym_t *sema_declare_enum_const(sema_t *self, char *name, val_t val)
+sym_t *sema_declare_enum_const(sema_t *self, const char *name, val_t val)
 {
     // Look for previous declaration in the current scope
     bool found;
@@ -332,7 +332,7 @@ ty_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
 
     // Create type
     ty_t *ty = make_ty(kind);
-    ty->as_aggregate.name = strdup(name);
+    ty->as_aggregate.name = name;
 
     // Add it to the current scope
     entry->key = ty->as_aggregate.name;
@@ -357,7 +357,7 @@ ty_t *sema_define_tag(sema_t *self, int kind, const char *name)
 
     // Create new type
     ty_t *ty = make_ty(kind);
-    ty->as_aggregate.name = strdup(name);
+    ty->as_aggregate.name = name;
     // Add it to the current scope
     entry->key = ty->as_aggregate.name;
     entry->as_ty = ty;
@@ -380,7 +380,7 @@ expr_t *make_sym_expr(sema_t *self, const char *name)
 {
     // Special pre-declared identifier
     if (self->func_name && !strcmp(name, "__func__"))
-        return make_str_expr(strdup(self->func_name));
+        return make_str_expr(self->func_name);
 
     // Find symbol
     sym_t *sym = sema_lookup(self, name);
@@ -416,7 +416,7 @@ expr_t *make_const_expr(ty_t *ty, val_t value)
     return expr;
 }
 
-expr_t *make_str_expr(char *data)
+expr_t *make_str_expr(const char *data)
 {
     expr_t *expr = alloc_expr(EXPR_STR);
     expr->ty = make_array(&ty_char, strlen(data) + 1);
@@ -492,7 +492,7 @@ expr_t *make_memb_expr(expr_t *aggr, const char *name)
 {
     expr_t *expr = alloc_expr(EXPR_MEMB);
     expr->as_memb.aggr = aggr;
-    expr->as_memb.name = strdup(name);
+    expr->as_memb.name = name;
     expr->as_memb.offset = find_memb(aggr->ty, name, &expr->ty);
     if (expr->as_memb.offset == -1)
         err("Non-existent member %s of type %T", name, aggr->ty);
