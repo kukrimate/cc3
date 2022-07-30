@@ -24,13 +24,16 @@ static int peek(lexer_t *self, int i)
         return self->cur[i];
 
     // Copy chars to the start of the buffer
-    char *tmp = self->cur;
+    char *oldcur = self->cur;
+    char *oldend = self->end;
     self->cur = self->buf;
-    while (tmp < self->end)
-        *self->cur++ = *tmp++;
+    self->end = self->buf;
+    while (oldend > oldcur) {
+        *self->end++ = *--oldend;
+    }
 
     // Fill buffer with characters
-    self->end = self->cur + read(self->in_fd, self->cur, LEX_BUF_SZ / 2);
+    self->end += read(self->in_fd, self->end, LEX_BUF_SZ / 2);
 
     // Return character if we read enough
     if (self->cur + i < self->end)
