@@ -319,7 +319,7 @@ enum {
     TY_ARITH_MASK = TY_INT_MASK | TY_FLOAT | TY_DOUBLE | TY_LDOUBLE,
 
     // Scalar type
-    TY_SCALAR_MASK = TY_ARITH_MASK | TY_POINTER,
+    TY_SCALAR_MASK = TY_ARITH_MASK | TY_POINTER | TY_ARRAY | TY_FUNCTION,
 };
 
 typedef struct scope scope_t;
