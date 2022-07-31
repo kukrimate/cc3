@@ -17,14 +17,14 @@ void gen_init(gen_t *self, int out_fd)
 {
     self->out_fd = out_fd;
     self->label_cnt = 0;
-    map_init(&self->lits);
-    map_init(&self->gotos);
+    int_map_init(&self->lits);
+    int_map_init(&self->gotos);
 }
 
 void gen_free(gen_t *self)
 {
-    map_free(&self->lits);
-    map_free(&self->gotos);
+    int_map_free(&self->lits);
+    int_map_free(&self->gotos);
 }
 
 static int next_label(gen_t *self)
@@ -38,12 +38,12 @@ static int next_label(gen_t *self)
 static int lit_to_label(gen_t *self, const char *data)
 {
     bool found;
-    entry_t *entry = map_find_or_insert(&self->lits, data, &found);
+    int_entry_t *entry = int_map_find_or_insert(&self->lits, data, &found);
 
     if (found)
-        return entry->as_int;
+        return entry->value;
     else
-        return entry->as_int = next_label(self);
+        return entry->value = next_label(self);
 }
 
 static void gen_const_addr(gen_t *self, expr_t *expr, int offset)
@@ -190,12 +190,12 @@ static int next_case_label(gen_t *self, int begin, int end)
 static int map_goto(gen_t *self, const char *name)
 {
     bool found;
-    entry_t *entry = map_find_or_insert(&self->gotos, name, &found);
+    int_entry_t *entry = int_map_find_or_insert(&self->gotos, name, &found);
 
     if (found)
-        return entry->as_int;
+        return entry->value;
     else
-        return entry->as_int = next_label(self);
+        return entry->value = next_label(self);
 }
 
 static void emit_target(gen_t *self, int label)
@@ -274,7 +274,7 @@ void gen_addr(gen_t *self, expr_t *expr)
             "\taddq\t$%d, 8(%%rcx)\n"       // va_list->overflow_arg_area += ty_size
             ".L%d:\n",
             loflo,
-            align(expr->ty->size, 8),
+            ALIGNED(expr->ty->size, 8),
             lend);
 
         break;
@@ -890,7 +890,7 @@ static void gen_stmts(gen_t *self, stmt_vec_t *stmts)
             sym_t *sym = head->as_decl.sym;
             // Allocate local variable
             self->offset += sym->ty->size;
-            sym->offset = -(self->offset = align(self->offset, sym->ty->align));
+            sym->offset = -(self->offset = ALIGNED(self->offset, sym->ty->align));
             // Generate initializer
             if (head->as_decl.has_init)
                 gen_initializer(self, sym->ty, sym->offset, &head->as_decl.init);
@@ -974,7 +974,7 @@ void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
     VEC_FOREACH(&sym->ty->function.params, param)
         if (gp < 6) {
             self->offset += param->ty->size;
-            self->offset = align(self->offset, param->ty->align);
+            self->offset = ALIGNED(self->offset, param->ty->align);
             gen_param_spill(self,
                 param->sym->ty,
                 param->sym->offset = -self->offset,
@@ -982,7 +982,7 @@ void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
         } else {
             int palign = param->ty->align;
             param->sym->offset =
-                (oflo = align(oflo, palign < 8 ? 8 : palign));
+                (oflo = ALIGNED(oflo, palign < 8 ? 8 : palign));
             oflo += param->ty->size;
         }
 
@@ -1000,7 +1000,7 @@ void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
     self->continue_label = -1;
     self->default_label = -1;
     self->cases = NULL;
-    map_clear(&self->gotos);
+    int_map_clear(&self->gotos);
 
     // Generate body
     gen_stmts(self, stmts);
@@ -1012,7 +1012,7 @@ void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
         "\tret\n");
 
     // Provide stackframe size
-    emit(self, "\t.set\t%s_fs, %d\n", sym->asm_name, align(self->offset, 16));
+    emit(self, "\t.set\t%s_fs, %d\n", sym->asm_name, ALIGNED(self->offset, 16));
 }
 
 void gen_lits(gen_t *self)
@@ -1023,7 +1023,7 @@ void gen_lits(gen_t *self)
         // Emit name
         emit(self,
             ".LC%d:\n"
-            "\t.byte\t", entry->as_int);
+            "\t.byte\t", entry->value);
         // Emit chars
         for (const char *data = entry->key; *data; ++data)
             emit(self, "0x%02x, ", *data);

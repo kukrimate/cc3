@@ -164,16 +164,16 @@ void sema_enter(sema_t *self)
     if (!scope) abort();
     scope->parent = self->scope;
     self->scope = scope;
-    map_init(&scope->syms);
-    map_init(&scope->tags);
+    sym_map_init(&scope->syms);
+    ty_map_init(&scope->tags);
 }
 
 void sema_exit(sema_t *self)
 {
     scope_t *scope = self->scope;
     self->scope = scope->parent;
-    map_free(&scope->syms);
-    map_free(&scope->tags);
+    sym_map_free(&scope->syms);
+    ty_map_free(&scope->tags);
 }
 
 void sema_push(sema_t *self, scope_t *scope)
@@ -213,17 +213,15 @@ static int sym_kind(sema_t *self, int sc)
 
 sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, const char *name)
 {
-    // debugln("Declare %s: %T", name, ty);
-
     // Figure out the symbol kind
     int kind = sym_kind(self, sc);
 
     // Look for previous declaration in the current scope
     bool found;
-    entry_t *entry = map_find_or_insert(&self->scope->syms, name, &found);
+    sym_entry_t *entry = sym_map_find_or_insert(&self->scope->syms, name, &found);
 
     if (found) {
-        sym_t *sym = entry->as_sym;
+        sym_t *sym = entry->value;
 
         switch (sym->kind) {
         case SYM_EXTERN:
@@ -265,7 +263,7 @@ sym_t *sema_declare(sema_t *self, int sc, ty_t *ty, const char *name)
     }
 
     // Add it to the symbol table
-    entry->as_sym = sym;
+    entry->value = sym;
 
     return sym;
 }
@@ -274,20 +272,22 @@ sym_t *sema_declare_enum_const(sema_t *self, const char *name, val_t val)
 {
     // Look for previous declaration in the current scope
     bool found;
-    entry_t *entry = map_find_or_insert(&self->scope->syms, name, &found);
+    sym_entry_t *entry = sym_map_find_or_insert(&self->scope->syms, name, &found);
 
     if (found)
         err("Re-declaration of enumeration constant %s", name);
 
     // Create symbol
     sym_t *sym = calloc(1, sizeof *sym);
-    if (!sym) abort();
+    if (!sym) {
+        abort();
+    }
     sym->kind = SYM_ENUM_CONST;
     sym->name = name;
     sym->val = val;
 
     // Declare it in the current scope
-    entry->as_sym = sym;
+    entry->value = sym;
 
     return sym;
 }
@@ -295,9 +295,10 @@ sym_t *sema_declare_enum_const(sema_t *self, const char *name, val_t val)
 sym_t *sema_lookup(sema_t *self, const char *name)
 {
     for (scope_t *scope = self->scope; scope; scope = scope->parent) {
-        entry_t *entry = map_find(&scope->syms, name);
-        if (entry)
-            return entry->as_sym;
+        sym_entry_t *entry = sym_map_find(&scope->syms, name);
+        if (entry) {
+            return entry->value;
+        }
     }
     return NULL;
 }
@@ -313,21 +314,24 @@ ty_t *sema_findtypedef(sema_t *self, const char *name)
 ty_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
 {
     // Look for name in any scope
-    entry_t *entry = NULL;
-    for (scope_t *scope = self->scope; scope; scope = scope->parent)
-        if ((entry = map_find(&scope->tags, name)))
+    ty_entry_t *entry = NULL;
+
+    for (scope_t *scope = self->scope; scope; scope = scope->parent) {
+        if ((entry = ty_map_find(&scope->tags, name))) {
             break;
+        }
+    }
 
     if (entry) {
         // Make sure the right keyword is used to refer to the tag
-        if (entry->as_ty->kind != kind)
+        if (entry->value->kind != kind)
             err("Tag referred to with the wrong keyword");
         // Return the type associated with the tag we found
-        return entry->as_ty;
+        return entry->value;
     }
 
     bool found;
-    entry = map_find_or_insert(&self->scope->tags, name, &found);
+    entry = ty_map_find_or_insert(&self->scope->tags, name, &found);
     assert(!found);
 
     // Create type
@@ -336,7 +340,7 @@ ty_t *sema_forward_declare_tag(sema_t *self, int kind, const char *name)
 
     // Add it to the current scope
     entry->key = ty->as_aggregate.name;
-    entry->as_ty = ty;
+    entry->value = ty;
 
     return ty;
 }
@@ -345,14 +349,14 @@ ty_t *sema_define_tag(sema_t *self, int kind, const char *name)
 {
     // Look for name just in the current scope
     bool found;
-    entry_t *entry = map_find_or_insert(&self->scope->tags, name, &found);
+    ty_entry_t *entry = ty_map_find_or_insert(&self->scope->tags, name, &found);
 
     if (found) {
         // Make sure the right keyword is used to refer to the tag
-        if (entry->as_ty->kind != kind)
+        if (entry->value->kind != kind)
             err("Tag referred to with the wrong keyword");
         // Return the type associated with the tag we found
-        return entry->as_ty;
+        return entry->value;
     }
 
     // Create new type
@@ -360,7 +364,7 @@ ty_t *sema_define_tag(sema_t *self, int kind, const char *name)
     ty->as_aggregate.name = name;
     // Add it to the current scope
     entry->key = ty->as_aggregate.name;
-    entry->as_ty = ty;
+    entry->value = ty;
     return ty;
 }
 

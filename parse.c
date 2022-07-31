@@ -665,7 +665,7 @@ static void pack_member(ty_t *ty, memb_t *memb)
             ty->align = memb->ty->align;
         // Then we align the current size to the member's alignment
         // and that becomes the member's offset
-        memb->offset = (ty->size = align(ty->size, memb->ty->align));
+        memb->offset = (ty->size = ALIGNED(ty->size, memb->ty->align));
         // Finally we increase the size by the member's size
         ty->size += memb->ty->size;
     } else {                        // TY_UNION
@@ -723,8 +723,9 @@ static ty_t *aggregate_definition(cc3_t *self, ty_t *ty)
     } while (!maybe_want(self, TK_RCURLY));
 
     // The size of a struct must be a multiple of its alignment
-    if (ty->kind == TY_STRUCT)
-        ty->size = align(ty->size, ty->align);
+    if (ty->kind == TY_STRUCT) {
+        ty->size = ALIGNED(ty->size, ty->align);
+    }
 
     return ty;
 }

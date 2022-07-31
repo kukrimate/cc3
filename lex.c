@@ -3,68 +3,68 @@
 #include "cc3.h"
 
 static bool have_strtab = false;
-static map_t strtab = {0};
+static int_map_t strtab = {0};
 
 static void strtab_init(void)
 {
-    map_init(&strtab);
+    int_map_init(&strtab);
 
     // Standard keywords
-    map_find_or_insert(&strtab, "auto", NULL)->as_int = TK_AUTO;
-    map_find_or_insert(&strtab, "break", NULL)->as_int = TK_BREAK;
-    map_find_or_insert(&strtab, "case", NULL)->as_int = TK_CASE;
-    map_find_or_insert(&strtab, "char", NULL)->as_int = TK_CHAR;
-    map_find_or_insert(&strtab, "const", NULL)->as_int = TK_CONST;
-    map_find_or_insert(&strtab, "continue", NULL)->as_int = TK_CONTINUE;
-    map_find_or_insert(&strtab, "default", NULL)->as_int = TK_DEFAULT;
-    map_find_or_insert(&strtab, "do", NULL)->as_int = TK_DO;
-    map_find_or_insert(&strtab, "double", NULL)->as_int = TK_DOUBLE;
-    map_find_or_insert(&strtab, "else", NULL)->as_int = TK_ELSE;
-    map_find_or_insert(&strtab, "enum", NULL)->as_int = TK_ENUM;
-    map_find_or_insert(&strtab, "extern", NULL)->as_int = TK_EXTERN;
-    map_find_or_insert(&strtab, "float", NULL)->as_int = TK_FLOAT;
-    map_find_or_insert(&strtab, "for", NULL)->as_int = TK_FOR;
-    map_find_or_insert(&strtab, "goto", NULL)->as_int = TK_GOTO;
-    map_find_or_insert(&strtab, "if", NULL)->as_int = TK_IF;
-    map_find_or_insert(&strtab, "inline", NULL)->as_int = TK_INLINE;
-    map_find_or_insert(&strtab, "int", NULL)->as_int = TK_INT;
-    map_find_or_insert(&strtab, "long", NULL)->as_int = TK_LONG;
-    map_find_or_insert(&strtab, "register", NULL)->as_int = TK_REGISTER;
-    map_find_or_insert(&strtab, "restrict", NULL)->as_int = TK_RESTRICT;
-    map_find_or_insert(&strtab, "return", NULL)->as_int = TK_RETURN;
-    map_find_or_insert(&strtab, "short", NULL)->as_int = TK_SHORT;
-    map_find_or_insert(&strtab, "signed", NULL)->as_int = TK_SIGNED;
-    map_find_or_insert(&strtab, "sizeof", NULL)->as_int = TK_SIZEOF;
-    map_find_or_insert(&strtab, "static", NULL)->as_int = TK_STATIC;
-    map_find_or_insert(&strtab, "struct", NULL)->as_int = TK_STRUCT;
-    map_find_or_insert(&strtab, "switch", NULL)->as_int = TK_SWITCH;
-    map_find_or_insert(&strtab, "typedef", NULL)->as_int = TK_TYPEDEF;
-    map_find_or_insert(&strtab, "union", NULL)->as_int = TK_UNION;
-    map_find_or_insert(&strtab, "unsigned", NULL)->as_int = TK_UNSIGNED;
-    map_find_or_insert(&strtab, "void", NULL)->as_int = TK_VOID;
-    map_find_or_insert(&strtab, "volatile", NULL)->as_int = TK_VOLATILE;
-    map_find_or_insert(&strtab, "while", NULL)->as_int = TK_WHILE;
-    map_find_or_insert(&strtab, "_Bool", NULL)->as_int = TK_BOOL;
-    map_find_or_insert(&strtab, "_Complex", NULL)->as_int = TK_COMPLEX;
-    map_find_or_insert(&strtab, "_Imaginary", NULL)->as_int = TK_IMAGINARY;
+    int_map_find_or_insert(&strtab, "auto", NULL)->value = TK_AUTO;
+    int_map_find_or_insert(&strtab, "break", NULL)->value = TK_BREAK;
+    int_map_find_or_insert(&strtab, "case", NULL)->value = TK_CASE;
+    int_map_find_or_insert(&strtab, "char", NULL)->value = TK_CHAR;
+    int_map_find_or_insert(&strtab, "const", NULL)->value = TK_CONST;
+    int_map_find_or_insert(&strtab, "continue", NULL)->value = TK_CONTINUE;
+    int_map_find_or_insert(&strtab, "default", NULL)->value = TK_DEFAULT;
+    int_map_find_or_insert(&strtab, "do", NULL)->value = TK_DO;
+    int_map_find_or_insert(&strtab, "double", NULL)->value = TK_DOUBLE;
+    int_map_find_or_insert(&strtab, "else", NULL)->value = TK_ELSE;
+    int_map_find_or_insert(&strtab, "enum", NULL)->value = TK_ENUM;
+    int_map_find_or_insert(&strtab, "extern", NULL)->value = TK_EXTERN;
+    int_map_find_or_insert(&strtab, "float", NULL)->value = TK_FLOAT;
+    int_map_find_or_insert(&strtab, "for", NULL)->value = TK_FOR;
+    int_map_find_or_insert(&strtab, "goto", NULL)->value = TK_GOTO;
+    int_map_find_or_insert(&strtab, "if", NULL)->value = TK_IF;
+    int_map_find_or_insert(&strtab, "inline", NULL)->value = TK_INLINE;
+    int_map_find_or_insert(&strtab, "int", NULL)->value = TK_INT;
+    int_map_find_or_insert(&strtab, "long", NULL)->value = TK_LONG;
+    int_map_find_or_insert(&strtab, "register", NULL)->value = TK_REGISTER;
+    int_map_find_or_insert(&strtab, "restrict", NULL)->value = TK_RESTRICT;
+    int_map_find_or_insert(&strtab, "return", NULL)->value = TK_RETURN;
+    int_map_find_or_insert(&strtab, "short", NULL)->value = TK_SHORT;
+    int_map_find_or_insert(&strtab, "signed", NULL)->value = TK_SIGNED;
+    int_map_find_or_insert(&strtab, "sizeof", NULL)->value = TK_SIZEOF;
+    int_map_find_or_insert(&strtab, "static", NULL)->value = TK_STATIC;
+    int_map_find_or_insert(&strtab, "struct", NULL)->value = TK_STRUCT;
+    int_map_find_or_insert(&strtab, "switch", NULL)->value = TK_SWITCH;
+    int_map_find_or_insert(&strtab, "typedef", NULL)->value = TK_TYPEDEF;
+    int_map_find_or_insert(&strtab, "union", NULL)->value = TK_UNION;
+    int_map_find_or_insert(&strtab, "unsigned", NULL)->value = TK_UNSIGNED;
+    int_map_find_or_insert(&strtab, "void", NULL)->value = TK_VOID;
+    int_map_find_or_insert(&strtab, "volatile", NULL)->value = TK_VOLATILE;
+    int_map_find_or_insert(&strtab, "while", NULL)->value = TK_WHILE;
+    int_map_find_or_insert(&strtab, "_Bool", NULL)->value = TK_BOOL;
+    int_map_find_or_insert(&strtab, "_Complex", NULL)->value = TK_COMPLEX;
+    int_map_find_or_insert(&strtab, "_Imaginary", NULL)->value = TK_IMAGINARY;
 
     // Extensions
-    map_find_or_insert(&strtab, "__inline", NULL)->as_int = TK_INLINE;
-    map_find_or_insert(&strtab, "__typeof__", NULL)->as_int = TK_TYPEOF;
-    map_find_or_insert(&strtab, "__builtin_va_list", NULL)->as_int = TK_VA_LIST;
-    map_find_or_insert(&strtab, "__builtin_va_start", NULL)->as_int = TK_VA_START;
-    map_find_or_insert(&strtab, "__builtin_va_end", NULL)->as_int = TK_VA_END;
-    map_find_or_insert(&strtab, "__builtin_va_arg", NULL)->as_int = TK_VA_ARG;
+    int_map_find_or_insert(&strtab, "__inline", NULL)->value = TK_INLINE;
+    int_map_find_or_insert(&strtab, "__typeof__", NULL)->value = TK_TYPEOF;
+    int_map_find_or_insert(&strtab, "__builtin_va_list", NULL)->value = TK_VA_LIST;
+    int_map_find_or_insert(&strtab, "__builtin_va_start", NULL)->value = TK_VA_START;
+    int_map_find_or_insert(&strtab, "__builtin_va_end", NULL)->value = TK_VA_END;
+    int_map_find_or_insert(&strtab, "__builtin_va_arg", NULL)->value = TK_VA_ARG;
 }
 
-static entry_t *strtab_intern(const char *spelling)
+static int_entry_t *strtab_intern(const char *spelling)
 {
     bool found;
-    entry_t *entry = map_find_or_insert(&strtab, spelling, &found);
+    int_entry_t *entry = int_map_find_or_insert(&strtab, spelling, &found);
 
     if (!found) {
         entry->key = strdup(spelling);
-        entry->as_int = -1;
+        entry->value = -1;
     }
 
     return entry;
@@ -548,8 +548,9 @@ end_str:
         tk->kind = TK_ERROR;
     }
 
-    entry_t *entry = strtab_intern(self->spelling.data);
+    int_entry_t *entry = strtab_intern(self->spelling.data);
     tk->spelling = entry->key;
-    if (entry->as_int >= 0)
-        tk->kind = entry->as_int;
+    if (entry->value >= 0) {
+        tk->kind = entry->value;
+    }
 }

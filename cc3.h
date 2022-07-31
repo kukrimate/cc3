@@ -14,107 +14,62 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include "vec.h"
+#include "lib/map.h"
+#include "lib/string.h"
+#include "lib/vec.h"
 
-/** Size of an array in elements **/
-#define ARRAY_SIZE(array) (sizeof (array) / sizeof *(array))
+/* Calculate modulo a power of 2 */
 
-/** Enforce unreachability **/
-#define ASSERT_NOT_REACHED() assert(0)
+#define MOD_POW2(val, mod) ((val) & ((mod) - 1))
 
-/** Move a value to a heap allocation **/
+/* Round up to the nearest power of two */
+
+#define ROUND_POW2(size)                                \
+    ({                                                  \
+        __typeof__(size) _size = size,                  \
+                         _newsize = 1;                  \
+        while (_newsize < _size) {                      \
+            _newsize <<= 1;                             \
+        }                                               \
+        _newsize;                                       \
+    })
+
+/* Size of an array in elements */
+
+#define ARRAY_SIZE(array)                               \
+    (sizeof (array) / sizeof *(array))
+
+/* Enforce unreachability */
+
+#define ASSERT_NOT_REACHED()                            \
+    assert("Tried to execute unreachable code" && false)
+
+/* Move a value to a heap allocation */
+
 #define BOX(val)                                        \
     ({                                                  \
-        __typeof__(val) *ptr = malloc(sizeof val);      \
+        __typeof__(val) *_ptr = malloc(sizeof val);     \
         if (!ptr) abort();                              \
         *ptr = val;                                     \
         ptr;                                            \
     })
 
-/** Align (up) val to the nearest multiple of bound **/
-int align(int val, int bound);
+/* Align (up) val to the nearest multiple of bound */
 
-/** Print a message **/
-void println(const char *fmt, ...);
+#define ALIGNED(val, bound)                             \
+    ({                                                  \
+        __typeof__(val) _val = val;                     \
+        __typeof__(bound) _bound = bound;               \
+        (_val + _bound - 1) / _bound * _bound;          \
+    })
 
-/** Exit with an error message **/
+/* Exit with an error message */
+
 __attribute__((noreturn)) void err(const char *fmt, ...);
 
-/** Print a debugging message **/
-#ifdef NDEBUG
-#define debugln(fmt, ...)
-#else
-#define debugln(fmt, ...) println(fmt, ## __VA_ARGS__)
-#endif
+/* Switch fallthrough marker */
 
-/** Switch fallthrough marker **/
-#ifdef __GNUC__
 #define FALLTHROUGH __attribute__((fallthrough))
-#else
-#define FALLTHROUGH
-#endif
-
-/** Resizable string abstraction **/
-typedef struct string string_t;
-
-struct string {
-    size_t length;
-    size_t capacity;
-    char *data;
-};
-
-void string_init(string_t *self);
-void string_free(string_t *self);
-void string_clear(string_t *self);
-void string_reserve(string_t *self, size_t new_capacity);
-void string_push(string_t *self, char c);
-void string_vprintf(string_t *self, const char *fmt, va_list ap);
-void string_printf(string_t *self, const char *fmt, ...);
-
-/** Hash table **/
-
-typedef struct ty ty_t;
-typedef struct sym sym_t;
-
-enum {
-    ENTRY_EMPTY,
-    ENTRY_ACTIVE,
-    ENTRY_DELETED
-};
-
-typedef struct {
-    uint8_t state;
-    uint32_t hash;
-    const char *key;
-
-    union {
-        ty_t *as_ty;
-        sym_t *as_sym;
-        int as_int;
-    };
-} entry_t;
-
-typedef struct {
-    uint32_t count;     // # of active entries
-    uint32_t load;      // # of active + deleted entries
-    uint32_t capacity;  // Capacity of the array
-    entry_t *arr;
-} map_t;
-
-void map_init(map_t *self);
-void map_free(map_t *self);
-void map_clear(map_t *self);
-entry_t *map_find(map_t *self, const char *key);
-entry_t *map_find_or_insert(map_t *self, const char *key, bool *found);
-bool map_delete(map_t *self, const char *key);
-
-#define MAP_ITER(map, iter)                                         \
-    for (entry_t *iter = (map)->arr, *end = iter + (map)->capacity; \
-            ({                                                      \
-                while (iter < end && iter->state != ENTRY_ACTIVE)   \
-                    ++iter;                                         \
-                iter < end;                                         \
-            }); ++iter)
 
 /** Tokens **/
 
@@ -276,20 +231,23 @@ void lex_next(lexer_t *self, tk_t *tk);
 
 /** Types **/
 
+typedef struct ty ty_t;
+typedef struct sym sym_t;
+
 typedef struct {
     ty_t *ty;
     const char *name;
     int offset;
 } memb_t;
 
-VEC_DEF(memb_vec, memb_t)
+VEC_DEF(memb, memb_t)
 
 typedef struct {
     ty_t *ty;
     sym_t *sym;
 } param_t;
 
-VEC_DEF(param_vec, param_t)
+VEC_DEF(param, param_t)
 
 // Type kinds are a non-overlapping bitflag collection. This allows cheap
 // testing for a group of types.
@@ -418,10 +376,14 @@ struct sym {
     val_t val;
 };
 
+MAP_DEF(sym, const char *, sym_t *)
+MAP_DEF(ty, const char *, ty_t *)
+
+
 struct scope {
     scope_t *parent;
-    map_t syms;
-    map_t tags;
+    sym_map_t syms;
+    ty_map_t tags;
 };
 
 /** Semantic actions **/
@@ -466,8 +428,8 @@ ty_t *sema_define_tag(sema_t *self, int kind, const char *name);
 typedef struct expr expr_t;
 typedef struct stmt stmt_t;
 
-VEC_DEF(expr_vec, expr_t *)
-VEC_DEF(stmt_vec, stmt_t)
+VEC_DEF(expr, expr_t *)
+VEC_DEF(stmt, stmt_t)
 
 enum {
     EXPR_SYM,
@@ -614,7 +576,7 @@ enum {
 
 typedef struct init init_t;
 
-VEC_DEF(init_vec, init_t)
+VEC_DEF(init, init_t)
 
 struct init {
     int kind;
@@ -692,13 +654,15 @@ void print_stmts(stmt_vec_t *stmts, int indent);
 
 /** Code generation **/
 
+MAP_DEF(int, const char *, int)
+
 typedef struct {
     int label;
     int begin;
     int end;
 } case_t;
 
-VEC_DEF(case_vec, case_t)
+VEC_DEF(case, case_t)
 
 typedef struct gen {
     /** Global state **/
@@ -706,7 +670,7 @@ typedef struct gen {
     // Next unique label #
     int label_cnt;
     // String literals
-    map_t lits;
+    int_map_t lits;
 
     /** Function state **/
 
@@ -724,7 +688,7 @@ typedef struct gen {
     int continue_label;
     int default_label;
     case_vec_t *cases;
-    map_t gotos;
+    int_map_t gotos;
 } gen_t;
 
 void gen_init(gen_t *self, int out_fd);
