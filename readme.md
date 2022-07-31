@@ -3,8 +3,7 @@
 CC3 is a work-in-progress compiler from C99 (ISO/IEC 9899:1999) to AMD64.
 It can compile itself using an external pre-processor.
 
-Its current state is a result of ~3 weeks of work, the main goal in this period
-was compiling itself, as a result there are many TODOs:
+The following features are notable missing:
 - Integrated pre-processor
 - Any support for floating point types
 - Passing structure and union parameters by value
