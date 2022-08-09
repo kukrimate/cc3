@@ -109,31 +109,15 @@ static bool end_comma_separated(cc3_t *self)
 
 /** Expressions **/
 
-static expr_t *primary_expression(cc3_t *self);
-static expr_t *postfix_expression(cc3_t *self);
-static expr_t *unary_expression(cc3_t *self);
-static expr_t *cast_expression(cc3_t *self);
-static expr_t *multiplicative_expression(cc3_t *self);
-static expr_t *additive_expression(cc3_t *self);
-static expr_t *shift_expression(cc3_t *self);
-static expr_t *relational_expression(cc3_t *self);
-static expr_t *equality_expression(cc3_t *self);
-static expr_t *and_expression(cc3_t *self);
-static expr_t *xor_expression(cc3_t *self);
-static expr_t *or_expression(cc3_t *self);
-static expr_t *land_expression(cc3_t *self);
-static expr_t *lor_expression(cc3_t *self);
-static expr_t *conditional_expression(cc3_t *self);
 static expr_t *assignment_expression(cc3_t *self);
 static expr_t *expression(cc3_t *self);
-static int constant_expression(cc3_t *self);
 
 static bool is_type_name(cc3_t *self, tk_t *tk);
 static ty_t *type_name(cc3_t *self);
 
 static void compound_statement(cc3_t *self, stmt_vec_t *stmts);
 
-expr_t *primary_expression(cc3_t *self)
+static expr_t *primary_expression(cc3_t *self)
 {
     tk_t *tk = next(self);
     expr_t *expr;
@@ -196,20 +180,17 @@ expr_t *primary_expression(cc3_t *self)
     return expr;
 }
 
-expr_t *postfix_expression(cc3_t *self)
+static expr_t *postfix_expression(cc3_t *self)
 {
     expr_t *expr = primary_expression(self);
 
-    for (;;) {
+    for (;;)
         if (maybe_want(self, TK_LSQ)) {
             expr = make_dref_expr(make_add_expr(expr, expression(self)));
             want(self, TK_RSQ);
-            continue;
-        }
-        if (maybe_want(self, TK_LPAREN)) {
+        } else if (maybe_want(self, TK_LPAREN)) {
             expr_vec_t args;
             expr_vec_init(&args);
-
             if (!maybe_want(self, TK_RPAREN)) {
                 do
                     *expr_vec_push(&args) = assignment_expression(self);
@@ -217,33 +198,27 @@ expr_t *postfix_expression(cc3_t *self)
                 want(self, TK_RPAREN);
             }
             expr = make_call_expr(expr, &args);
-            continue;
-        }
-        if (maybe_want(self, TK_DOT)) {
+        } else if (maybe_want(self, TK_DOT)) {
             expr = make_memb_expr(expr, tk_str(want(self, TK_IDENTIFIER)));
-            continue;
-        }
-        if (maybe_want(self, TK_ARROW)) {
+        } else if (maybe_want(self, TK_ARROW)) {
             expr = make_memb_expr(make_dref_expr(expr), tk_str(want(self, TK_IDENTIFIER)));
-            continue;
-        }
-        if (maybe_want(self, TK_INCR)) {
+        } else if (maybe_want(self, TK_INCR)) {
             // FIXME: this isn't exactly the best way to do this
             expr = make_sub_expr(make_as_expr(expr, make_add_expr(expr,
                 make_const_expr(&ty_int, 1))), make_const_expr(&ty_int, 1));
-            continue;
-        }
-        if (maybe_want(self, TK_DECR)) {
+        } else if (maybe_want(self, TK_DECR)) {
             expr = make_add_expr(make_as_expr(expr, make_sub_expr(expr,
                 make_const_expr(&ty_int, 1))), make_const_expr(&ty_int, 1));
-            continue;
+        } else {
+            // FIXME: recognize compound literals here
+            return expr;
         }
-        // FIXME: recognize compound literals here
-        return expr;
-    }
 }
 
-expr_t *unary_expression(cc3_t *self)
+static expr_t *unary_expression(cc3_t *self);
+static expr_t *cast_expression(cc3_t *self);
+
+static expr_t *unary_expression(cc3_t *self)
 {
     if (maybe_want(self, TK_INCR)) {
         expr_t *arg = unary_expression(self);
@@ -280,7 +255,7 @@ expr_t *unary_expression(cc3_t *self)
     }
 }
 
-expr_t *cast_expression(cc3_t *self)
+static expr_t *cast_expression(cc3_t *self)
 {
     if (peek(self, 0)->kind == TK_LPAREN && is_type_name(self, peek(self, 1))) {
         // '(' type-name ')' cast-expression
@@ -293,7 +268,7 @@ expr_t *cast_expression(cc3_t *self)
     }
 }
 
-expr_t *multiplicative_expression(cc3_t *self)
+static expr_t *multiplicative_expression(cc3_t *self)
 {
     expr_t *lhs = cast_expression(self);
     for (;;)
@@ -307,7 +282,7 @@ expr_t *multiplicative_expression(cc3_t *self)
             return lhs;
 }
 
-expr_t *additive_expression(cc3_t *self)
+static expr_t *additive_expression(cc3_t *self)
 {
     expr_t *lhs = multiplicative_expression(self);
     for (;;)
@@ -319,7 +294,7 @@ expr_t *additive_expression(cc3_t *self)
             return lhs;
 }
 
-expr_t *shift_expression(cc3_t *self)
+static expr_t *shift_expression(cc3_t *self)
 {
     expr_t *lhs = additive_expression(self);
     for (;;)
@@ -331,7 +306,7 @@ expr_t *shift_expression(cc3_t *self)
             return lhs;
 }
 
-expr_t *relational_expression(cc3_t *self)
+static expr_t *relational_expression(cc3_t *self)
 {
     expr_t *lhs = shift_expression(self);
     for (;;)
@@ -347,7 +322,7 @@ expr_t *relational_expression(cc3_t *self)
             return lhs;
 }
 
-expr_t *equality_expression(cc3_t *self)
+static expr_t *equality_expression(cc3_t *self)
 {
     expr_t *lhs = relational_expression(self);
     for (;;)
@@ -359,7 +334,7 @@ expr_t *equality_expression(cc3_t *self)
             return lhs;
 }
 
-expr_t *and_expression(cc3_t *self)
+static expr_t *and_expression(cc3_t *self)
 {
     expr_t *lhs = equality_expression(self);
     while (maybe_want(self, TK_AND))
@@ -367,7 +342,7 @@ expr_t *and_expression(cc3_t *self)
     return lhs;
 }
 
-expr_t *xor_expression(cc3_t *self)
+static expr_t *xor_expression(cc3_t *self)
 {
     expr_t *lhs = and_expression(self);
     while (maybe_want(self, TK_XOR))
@@ -375,7 +350,7 @@ expr_t *xor_expression(cc3_t *self)
     return lhs;
 }
 
-expr_t *or_expression(cc3_t *self)
+static expr_t *or_expression(cc3_t *self)
 {
     expr_t *lhs = xor_expression(self);
     while (maybe_want(self, TK_OR))
@@ -383,7 +358,7 @@ expr_t *or_expression(cc3_t *self)
     return lhs;
 }
 
-expr_t *land_expression(cc3_t *self)
+static expr_t *land_expression(cc3_t *self)
 {
     expr_t *lhs = or_expression(self);
     while (maybe_want(self, TK_LAND))
@@ -391,7 +366,7 @@ expr_t *land_expression(cc3_t *self)
     return lhs;
 }
 
-expr_t *lor_expression(cc3_t *self)
+static expr_t *lor_expression(cc3_t *self)
 {
     expr_t *lhs = land_expression(self);
     while (maybe_want(self, TK_LOR))
@@ -399,7 +374,7 @@ expr_t *lor_expression(cc3_t *self)
     return lhs;
 }
 
-expr_t *conditional_expression(cc3_t *self)
+static expr_t *conditional_expression(cc3_t *self)
 {
     expr_t *lhs = lor_expression(self);
     if (!maybe_want(self, TK_COND))
@@ -409,7 +384,7 @@ expr_t *conditional_expression(cc3_t *self)
     return make_cond_expr(lhs, mid, conditional_expression(self));
 }
 
-expr_t *assignment_expression(cc3_t *self)
+static expr_t *assignment_expression(cc3_t *self)
 {
     expr_t *lhs = conditional_expression(self);
     if (maybe_want(self, TK_AS))
@@ -448,7 +423,7 @@ expr_t *assignment_expression(cc3_t *self)
         return lhs;
 }
 
-expr_t *expression(cc3_t *self)
+static expr_t *expression(cc3_t *self)
 {
     expr_t *lhs = assignment_expression(self);
     while (maybe_want(self, TK_COMMA))
@@ -456,7 +431,7 @@ expr_t *expression(cc3_t *self)
     return lhs;
 }
 
-int constant_expression(cc3_t *self)
+static int constant_expression(cc3_t *self)
 {
     expr_t *expr = conditional_expression(self);
     if (expr->kind != EXPR_CONST)
