@@ -123,37 +123,85 @@ static void gen_const_expr(gen_t *self, expr_t *expr)
 static void gen_static_initializer(gen_t *self, ty_t *ty, init_t *init)
 {
     switch (ty->kind) {
+
     case TY_STRUCT:
-        assert(init->kind == INIT_LIST);
-        int i = 0;
-        VEC_FOREACH(&ty->as_aggregate.members, memb) {
-            emit(self, "\t.align\t%d\n", memb->ty->align);
-            gen_static_initializer(self, memb->ty, VEC_AT(&init->as_list, i++));
+
+        {
+            assert(init->kind == INIT_LIST);
+            assert(init->as_list.length == ty->as_aggregate.members.length);
+
+            memb_t *memb = VEC_BEGIN(&ty->as_aggregate.members),
+                   *end  = VEC_END(&ty->as_aggregate.members);
+
+            init_t *memb_init = VEC_BEGIN(&init->as_list);
+
+            int offset = 0;
+
+            for (; memb < end; ++memb, ++memb_init) {
+                assert(offset <= memb->offset);
+                if (offset < memb->offset) {
+                    emit(self, "\t.skip\t%d\n", memb->offset - offset);
+                    offset = memb->offset;
+                }
+                gen_static_initializer(self, memb->ty, memb_init);
+                offset += memb->ty->size;
+            }
+
+            assert(offset <= ty->size);
+            if (offset < ty->size) {
+                emit(self, "\t.skip\t%d\n", ty->size - offset);
+            }
+
+            break;
         }
 
-        emit(self, "\t.align\t%d\n", ty->align);        // End padding
-        break;
-
     case TY_UNION:
-        assert(init->kind == INIT_LIST);
-        gen_static_initializer(self,
-            VEC_AT(&ty->as_aggregate.members, 0)->ty,
-            VEC_AT(&init->as_list, 0));
-        emit(self, "\t.align\t%d\n", ty->align);        // End padding
-        break;
+
+        {
+            assert(init->kind == INIT_LIST);
+            assert(init->as_list.length == 1);
+
+            memb_t *memb = VEC_BEGIN(&ty->as_aggregate.members);
+            init_t *memb_init = VEC_BEGIN(&init->as_list);
+
+            int offset = 0;
+
+            assert(memb->offset == 0);
+            gen_static_initializer(self, memb->ty, memb_init);
+            offset += memb->ty->size;
+
+            assert(offset <= ty->size);
+            if (offset < ty->size) {
+                emit(self, "\t.skip\t%d\n", ty->size - offset);
+            }
+            
+            break;
+        }
 
     case TY_ARRAY:
-        assert(init->kind == INIT_LIST);
-        for (int i = 0; i < ty->array.cnt; ++i)
-            gen_static_initializer(self,
-                ty->array.elem_ty,
-                VEC_AT(&init->as_list, i));
-        break;
+
+        {
+            assert(init->kind == INIT_LIST);
+            assert(init->as_list.length == ty->array.cnt);
+
+            init_t *elem = VEC_BEGIN(&init->as_list),
+                   *end = VEC_END(&init->as_list);
+
+            for (; elem < end; ++elem) {
+                gen_static_initializer(self, ty->array.elem_ty, elem);
+            }
+
+            break;
+        }
 
     default:
-        assert(init->kind == INIT_EXPR);
-        gen_const_expr(self, init->as_expr);
-        break;
+
+        {
+            assert(init->kind == INIT_EXPR);
+            gen_const_expr(self, init->as_expr);
+            break;
+        }
+
     }
 }
 
