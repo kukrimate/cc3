@@ -2,7 +2,7 @@
 
 set -e
 
-files="cc3 gen sema parse lex debug util"
+files="cc3 gen sema parse lex util"
 
 ##
 # Stage 0: Build cc3 using cc3 built with the system compiler
@@ -15,7 +15,7 @@ do
 done
 
 echo "Linking (stage 0)"
-cc -o tmp/cc3 tmp/*.o
+cc -o tmp/cc3_stage0 tmp/*.o
 
 ##
 # Stage N: Build cc3 using cc3 built with itself
@@ -26,9 +26,9 @@ do
     for file in $files
     do
         echo "Compiling $file (stage $N)"
-        ./tmp/cc3 -c -o tmp/$file.o $file.c
+        ./tmp/cc3_stage$((N-1)) -c -o tmp/$file.o $file.c
     done
 
     echo "Linking (stage $N)"
-    cc -o tmp/cc3 tmp/*.o
+    cc -o tmp/cc3_stage$N tmp/*.o
 done

@@ -89,6 +89,92 @@ ty_t *make_function(ty_t *ret_ty, scope_t *scope, param_vec_t *params, bool var)
     return ty;
 }
 
+static void print_members(memb_vec_t *members)
+{
+    printf(" { ");
+    VEC_FOREACH(members, memb) {
+        print_ty(memb->ty);
+        if (memb->name)
+            printf(" %s", memb->name);
+        printf("; ");
+    }
+    printf("}");
+}
+
+void print_ty(ty_t *ty)
+{
+    switch (ty->kind) {
+    case TY_VOID:       printf("void");                 break;
+    case TY_CHAR:       printf("char");                 break;
+    case TY_SCHAR:      printf("signed char");          break;
+    case TY_UCHAR:      printf("unsigned char");        break;
+    case TY_SHORT:      printf("short");                break;
+    case TY_USHORT:     printf("unsigned short");       break;
+    case TY_INT:        printf("int");                  break;
+    case TY_UINT:       printf("unsigned int");         break;
+    case TY_LONG:       printf("long");                 break;
+    case TY_ULONG:      printf("unsigned long");        break;
+    case TY_LLONG:      printf("long long");            break;
+    case TY_ULLONG:     printf("unsigned long long");   break;
+    case TY_FLOAT:      printf("float");                break;
+    case TY_DOUBLE:     printf("double");               break;
+    case TY_LDOUBLE:    printf("long double");          break;
+    case TY_BOOL:       printf("_Bool");                break;
+
+    case TY_STRUCT:
+        if (ty->as_aggregate.name) {
+            printf("struct %s", ty->as_aggregate.name);
+        } else {
+            printf("struct");
+            assert(ty->as_aggregate.had_def);
+            print_members(&ty->as_aggregate.members);
+        }
+        break;
+
+    case TY_UNION:
+        if (ty->as_aggregate.name) {
+            printf("union %s", ty->as_aggregate.name);
+        } else {
+            printf("union");
+            assert(ty->as_aggregate.had_def);
+            print_members(&ty->as_aggregate.members);
+        }
+        break;
+
+    case TY_POINTER:
+        print_ty(ty->pointer.base_ty);
+        printf("*");
+        break;
+
+    case TY_ARRAY:
+        print_ty(ty->array.elem_ty);
+        if (ty->array.cnt < 0)
+            printf("[]");
+        else
+            printf("[%d]", ty->array.cnt);
+        break;
+
+    case TY_FUNCTION:
+        print_ty(ty->function.ret_ty);
+
+        printf("(");
+        VEC_FOREACH(&ty->function.params, param) {
+            print_ty(param->ty);
+            if (param->sym)
+                printf(" %s", param->sym->name);
+            printf(", ");
+        }
+        if (ty->function.var)
+            printf("...");
+        printf(")");
+        break;
+
+    default:
+        printf("%d\n", ty->kind);
+        ASSERT_NOT_REACHED();
+    }
+}
+
 static bool compare_ty(ty_t *ty1, ty_t *ty2)
 {
     switch (ty1->kind) {
@@ -1330,12 +1416,4 @@ void make_init_list(init_t *out, init_vec_t *list)
 {
     out->kind = INIT_LIST;
     out->as_list = *list;
-}
-
-stmt_t *make_stmt(int kind)
-{
-    stmt_t *stmt = calloc(1, sizeof *stmt);
-    if (!stmt) abort();
-    stmt->kind = kind;
-    return stmt;
 }

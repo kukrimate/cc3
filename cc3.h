@@ -44,15 +44,24 @@
 #define ASSERT_NOT_REACHED()                            \
     assert("Tried to execute unreachable code" && false)
 
-/* Move a value to a heap allocation */
+/* Allocate a typed object on the heap */
 
-#define BOX(val)                                        \
+#define NEW(ty)                                         \
     ({                                                  \
-        __typeof__(val) *_ptr = malloc(sizeof val);     \
-        if (!ptr) abort();                              \
-        *ptr = val;                                     \
-        ptr;                                            \
+        __typeof__(ty) *_ptr = malloc(sizeof (ty));     \
+        if (!_ptr) abort();                             \
+        _ptr;                                           \
     })
+
+ /* Move a value to a heap allocation */
+
+ #define BOX(val)                                       \
+     ({                                                 \
+         __typeof__(val) *_ptr = malloc(sizeof val);    \
+        if (!_ptr) abort();                             \
+        *_ptr = val;                                    \
+        _ptr;                                           \
+     })
 
 /* Align (up) val to the nearest multiple of bound */
 
@@ -565,8 +574,6 @@ expr_t *make_seq_expr(expr_t *lhs, expr_t *rhs);
 
 expr_t *make_stmt_expr(stmt_vec_t *stmts);
 
-void print_expr(expr_t *expr);
-
 /** Initializer **/
 
 enum {
@@ -649,8 +656,6 @@ struct stmt {
         } as_decl;
     };
 };
-
-void print_stmts(stmt_vec_t *stmts, int indent);
 
 /** Code generation **/
 
