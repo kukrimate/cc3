@@ -46,8 +46,7 @@ The compiler itself has 4 main modules:
     The parser is a relatively clean, predictive recursive descent parser.
     It uses an internal FIFO to allow for two tokens of lookahead. At its core
     it's an LL(2) parser. However it is entangled with context information
-    required to resolve typedef-name ambiguities, and type information to choose
-    productions during initializer parsing.
+    required to resolve typedef-name ambiguities.
 
     Expressions, initializers and statements produce an AST. However scoping is
     done by the semantic analyzer, thus nested block statements are not

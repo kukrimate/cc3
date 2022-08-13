@@ -1406,14 +1406,171 @@ expr_t *make_stmt_expr(stmt_vec_t *stmts)
     return expr;
 }
 
-void make_init_expr(init_t *out, ty_t *dest_ty, expr_t *expr)
+/** This section deals with the suckiness of C initializers so the code
+ *  generator doesn't have to. If you need any proof the C standard is downright
+ *  insane, filled with arcane special cases, just read this code. **/
+
+typedef struct {
+    init_t *it, *end;
+} init_context_t;
+
+static expr_t *unravel_expr(init_t *init)
 {
-    out->kind = INIT_EXPR;
-    out->as_expr = convert_by_assignment(dest_ty, expr);
+    while (init->kind == INIT_LIST) {
+        if (init->as_list.length != 1) {
+            return NULL;
+        }
+        init = VEC_BEGIN(&init->as_list);
+    }
+    return init->as_expr;
 }
 
-void make_init_list(init_t *out, init_vec_t *list)
+static void bind_scalar(init_t *out, init_context_t *ctx, ty_t *ty)
+{
+    out->kind = INIT_EXPR;
+
+    // If we reach a member of an aggregate without an initializer, we need to
+    // zero initialize it. We make that explicit to simplify code generation.
+    if (ctx->it == ctx->end) {
+        out->as_expr = make_const_expr(&ty_int, 0);
+        return;
+    }
+
+    // Otherwise we consume the first initializer from the iterator.
+    expr_t *expr = unravel_expr(ctx->it++);
+    if (!expr)
+        err("Trailing garbage after scalar initializer");
+
+    out->as_expr = expr;
+}
+
+static bool try_bind_str_lit(init_t *out, init_context_t *ctx, ty_t *ty)
+{
+    ty_t *elem_ty = ty->array.elem_ty;
+    expr_t *expr;
+
+    if (ctx->it == ctx->end
+            || !(expr = unravel_expr(ctx->it)) || expr->kind != EXPR_STR
+            || !(elem_ty->kind & (TY_CHAR | TY_SCHAR | TY_UCHAR))) {
+        return false;
+    }
+
+    const char *data = expr->as_str.data;
+
+    if (ty->array.cnt == -1) {
+        ty->array.cnt = strlen(data) + 1;
+        ty->align = elem_ty->align;
+        ty->size = elem_ty->size * ty->array.cnt;
+    }
+
+    out->kind = INIT_LIST;
+    init_vec_init(&out->as_list);
+
+    for (int i = 0; i < ty->array.cnt; ++i) {
+        init_t *ch = init_vec_push(&out->as_list);
+        ch->kind = INIT_EXPR;
+        ch->as_expr = make_const_expr(elem_ty, *data ? *data++ : 0);
+    }
+
+    return true;
+}
+
+static void bind_init_r(init_t *out, init_context_t *ctx, ty_t *ty, bool outer);
+
+static void bind_aggregate(init_t *out, init_context_t *ctx, ty_t *ty)
 {
     out->kind = INIT_LIST;
-    out->as_list = *list;
+    init_vec_init(&out->as_list);
+
+    switch (ty->kind) {
+    case TY_STRUCT:
+        // Bind an initializer to each member of the struct
+        VEC_FOREACH(&ty->as_aggregate.members, memb) {
+            bind_init_r(init_vec_push(&out->as_list), ctx, memb->ty, false);
+        }
+
+        break;
+
+    case TY_UNION:
+        // Bind one initializer to the first member
+        bind_init_r(init_vec_push(&out->as_list), ctx,
+                        VEC_FRONT(&ty->as_aggregate.members)->ty, false);
+
+        break;
+
+    case TY_ARRAY:
+        if (ty->array.cnt == -1) {
+            ty->array.cnt = ctx->end - ctx->it;
+            ty->align = ty->array.elem_ty->align;
+            ty->size = ty->array.elem_ty->size * ty->array.cnt;
+        }
+
+        // Bind an initializer to each array element
+        for (int i = 0; i < ty->array.cnt; ++i) {
+            bind_init_r(init_vec_push(&out->as_list), ctx, ty->array.elem_ty, false);
+        }
+
+        break;
+
+    default:
+        ASSERT_NOT_REACHED();
+    }
+}
+
+static void bind_init_r(init_t *out, init_context_t *ctx, ty_t *ty, bool outer)
+{
+    switch (ty->kind) {
+    case TY_ARRAY:
+
+        // Check for string literal initializer
+        if (try_bind_str_lit(out, ctx, ty))
+            break;
+
+        FALLTHROUGH;
+
+    case TY_STRUCT:
+    case TY_UNION:
+
+        if (ctx->it < ctx->end && ctx->it->kind == INIT_LIST) {
+            // Consume elements from the initializer list
+            init_context_t subctx = {
+                VEC_BEGIN(&ctx->it->as_list),
+                VEC_END(&ctx->it->as_list)
+            };
+
+            // Consume inner initializer list
+            ++ctx->it;
+
+            // Struct initializer is the inner list
+            bind_aggregate(out, &subctx, ty);
+
+            // Make sure there are no trailing entries
+            if (subctx.it < subctx.end) {
+                err("Trailing garbage after aggregate initializer");
+            }
+        } else {
+            // The outermost aggregate *must* have an initializer list
+            if (outer) {
+                err("Expected initializer list");
+            }
+
+            // Consume elements from the outer initializer list
+            bind_aggregate(out, ctx, ty);
+        }
+
+        break;
+
+    default:
+        bind_scalar(out, ctx, ty);
+    }
+}
+
+void bind_init(init_t *out, init_t *in, ty_t *ty)
+{
+    init_context_t ctx = {
+        in,
+        in + 1
+    };
+
+    bind_init_r(out, &ctx, ty, true);
 }

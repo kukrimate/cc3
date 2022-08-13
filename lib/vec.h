@@ -64,6 +64,18 @@ val_t *name ## _vec_push(name ## _vec_t *self)                                 \
         (vec)->data + tmp;                                                     \
     })                                                                         \
 
+#define VEC_FRONT(vec)                                                         \
+    ({                                                                         \
+        assert((vec)->length > 0);                                             \
+        (vec)->data;                                                           \
+    })                                                                         \
+
+#define VEC_BACK(vec)                                                          \
+    ({                                                                         \
+        assert((vec)->length > 0);                                             \
+        (vec)->data + (vec)->length - 1;                                       \
+    })                                                                         \
+
 #define VEC_BEGIN(vec)  ((vec)->data)
 #define VEC_END(vec)    ((vec)->data + (vec)->length)
 

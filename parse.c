@@ -441,190 +441,27 @@ static int constant_expression(cc3_t *self)
 
 /** Initializers **/
 
-static void scalar_initialzier(cc3_t *self, init_t *out, ty_t *ty)
+static void initializer_r(cc3_t *self, init_t *out)
 {
-    // If we reach a member of an aggregate without an initializer, we need to
-    // zero initialize it. We make that explicit to simplify code generation.
-    if (peek(self, 0)->kind == TK_RCURLY)
-        return make_init_expr(out, ty, make_const_expr(&ty_int, 0));
-
     if (maybe_want(self, TK_LCURLY)) {
-        // Recurse if the initializer is enclosed in braces
-        scalar_initialzier(self, out, ty);
-        want(self, TK_RCURLY);
+        out->kind = INIT_LIST;
+        init_vec_init(&out->as_list);
+        do {
+            initializer_r(self, init_vec_push(&out->as_list));
+        } while (!end_comma_separated(self));
     } else {
-        // Otherwise there must be an expression here
-        make_init_expr(out, ty, assignment_expression(self));
+        out->kind = INIT_EXPR;
+        out->as_expr = assignment_expression(self);
     }
-}
-
-static bool string_array_initializer(cc3_t *self, init_t *out, ty_t *ty)
-{
-    // Bail on non-character arrays
-    assert(ty->kind == TY_ARRAY);
-    if (!(ty->array.elem_ty->kind & (TY_CHAR | TY_SCHAR | TY_UCHAR)))
-        return false;
-
-    // Bail if the next token is not a string literal
-    // FIXME: the string literal might be enclosed in braces
-    tk_t *tk;
-    if (!(tk = maybe_want(self, TK_STR_LIT)))
-        return false;
-
-    // The string literal might complete the array's type
-    size_t str_len = strlen(tk->str);
-    if (ty->array.cnt == -1) {
-        int cnt = str_len + 1;
-        ty->align = ty->array.elem_ty->align;
-        ty->size = ty->array.elem_ty->size * cnt;
-        ty->array.cnt = cnt;
-    }
-
-    // Create an initializer list from the string literal
-    init_vec_t list;
-    init_vec_init(&list);
-
-    for (int i = 0; i < ty->array.cnt; ++i)
-        if (i < str_len)
-            make_init_expr(init_vec_push(&list), ty->array.elem_ty,
-                make_const_expr(&ty_char, tk->str[i]));
-        else
-            make_init_expr(init_vec_push(&list), ty->array.elem_ty,
-                make_const_expr(&ty_char, 0));
-
-    make_init_list(out, &list);
-    return true;
-}
-
-static void initializer_r(cc3_t *self, init_t *out, ty_t *ty, bool outer);
-
-static void struct_initializer(cc3_t *self, init_t *out, ty_t *ty)
-{
-    init_vec_t list;
-    init_vec_init(&list);
-
-    // Bind an initializer to each member of the struct
-    VEC_FOREACH(&ty->as_aggregate.members, memb)
-        initializer_r(self, init_vec_push(&list), memb->ty, false);
-
-    // Return the new initializer list we've built
-    make_init_list(out, &list);
-}
-
-static void union_initializer(cc3_t *self, init_t *out, ty_t *ty)
-{
-    // Like the struct initializer above, however only the first member
-    // can be initialized of an union
-
-    init_vec_t list;
-    init_vec_init(&list);
-    initializer_r(self, init_vec_push(&list),
-        VEC_AT(&ty->as_aggregate.members, 0)->ty, false);
-
-    make_init_list(out, &list);
-}
-
-static void array_initializer(cc3_t *self, init_t *out, ty_t *ty)
-{
-    init_vec_t list;
-    init_vec_init(&list);
-
-    if (ty->array.cnt == -1) {
-        // Bind as many initializers as we can, and count them
-        int cnt;
-        for (cnt = 0; peek(self, 0)->kind != TK_RCURLY; ++cnt)
-            initializer_r(self, init_vec_push(&list), ty->array.elem_ty, false);
-
-        // Then complete the array type with the number of entries
-        ty->align = ty->array.elem_ty->align;
-        ty->size = ty->array.elem_ty->size * cnt;
-        ty->array.cnt = cnt;
-    } else {
-        // Bind an initializer to each array element
-        for (int i = 0; i < ty->array.cnt; ++i)
-            initializer_r(self, init_vec_push(&list), ty->array.elem_ty, false);
-    }
-
-    // Return the new initializer list we've built
-    make_init_list(out, &list);
-}
-
-static void initializer_r(cc3_t *self, init_t *out, ty_t *ty, bool outer)
-{
-    switch (ty->kind) {
-    // Struct:
-    // - a brace enclosed initializer list
-    // - consume elements from the outer initializer list
-    case TY_STRUCT:
-        if (maybe_want(self, TK_LCURLY)) {
-            struct_initializer(self, out, ty);
-            want(self, TK_RCURLY);
-            break;
-        }
-
-        // Otherwise consume elements from the outer initializer list
-        if (outer)
-            err("Invalid initializer for struct %T", ty);
-
-        struct_initializer(self, out, ty);
-        break;
-
-    // Union:
-    // - a brace enclosed initializer list
-    // - consume elements from the outer initializer list
-    case TY_UNION:
-        if (maybe_want(self, TK_LCURLY)) {
-            union_initializer(self, out, ty);
-            want(self, TK_RCURLY);
-            break;
-        }
-
-        // Otherwise consume elements from the outer initializer list
-        if (outer)
-            err("Invalid initializer for union %T", ty);
-
-        union_initializer(self, out, ty);
-        break;
-
-    // Array:
-    // - for char arrays, a string literal, optionally in braces
-    // - a brace enclosed initializer list
-    // - consume elements from the outer initializer list
-    case TY_ARRAY:
-        if (ty->array.cnt == -1 && !outer)
-            err("Only the outermost array type is allowed to be incomplete");
-
-        // First see if we found a string literal initializer
-        if (string_array_initializer(self, out, ty))
-            break;
-
-        if (maybe_want(self, TK_LCURLY)) {
-            array_initializer(self, out, ty);
-            want(self, TK_RCURLY);
-            break;
-        }
-
-        // Otherwise consume elements from the outer initializer list
-        if (outer)
-            err("Invalid initializer for array %T", ty);
-
-        array_initializer(self, out, ty);
-        break;
-
-    // Scalar:
-    // - an expression, optionally in braces
-    default:
-        scalar_initialzier(self, out, ty);
-    }
-
-    // Initializer list members might be followed by a comma
-    if (!outer)
-        maybe_want(self, TK_COMMA);
 }
 
 static void initializer(cc3_t *self, init_t *out, ty_t *ty)
 {
-    initializer_r(self, out, ty, true);
+    init_t raw;
+    // Read initializer in sytactic form
+    initializer_r(self, &raw);
+    // Bind initializer with type to derive semantic form
+    bind_init(out, &raw, ty);
 }
 
 /** Declarations **/

@@ -594,8 +594,7 @@ struct init {
     };
 };
 
-void make_init_expr(init_t *out, ty_t *dest_ty, expr_t *expr);
-void make_init_list(init_t *out, init_vec_t *list);
+void bind_init(init_t *out, init_t *in, ty_t *ty);
 
 /** Statements **/
 
