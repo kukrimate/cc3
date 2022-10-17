@@ -293,6 +293,9 @@ enum {
                 | TY_SHORT | TY_USHORT | TY_INT | TY_UINT
                 | TY_LONG | TY_ULONG | TY_LLONG | TY_ULLONG,
 
+    // Signed integer types
+    TY_SIG_MASK = TY_CHAR | TY_SCHAR | TY_SHORT | TY_INT | TY_LONG | TY_LLONG,
+
     // Arithmetic type
     TY_ARITH_MASK = TY_INT_MASK | TY_FLOAT | TY_DOUBLE | TY_LDOUBLE,
 

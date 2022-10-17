@@ -479,8 +479,18 @@ void gen_value(gen_t *self, expr_t *expr)
         emit_pop(self, "%rcx");
 
         switch (expr->kind) {
-        case EXPR_DIV:  emit(self, "\txorl\t%%edx, %%edx\n\tdivq\t%%rcx\n"); break;
-        case EXPR_MOD:  emit(self, "\txorl\t%%edx, %%edx\n\tdivq\t%%rcx\n\tmovq\t%%rdx, %%rax\n"); break;
+        case EXPR_DIV:
+        case EXPR_MOD:
+            emit(self, "\txorl\t%%edx, %%edx\n");
+            if (expr->ty->kind & TY_SIG_MASK) {
+                emit(self, "\tidivq\t%%rcx\n");
+            } else {
+                emit(self, "\tdivq\t%%rcx\n");
+            }
+            if (expr->kind == EXPR_MOD) {
+                emit(self, "\tmovq\t%%rdx, %%rax\n");
+            }
+            break;
         case EXPR_MUL:  emit(self, "\timulq\t%%rcx, %%rax\n"); break;
         case EXPR_ADD:  emit(self, "\taddq\t%%rcx, %%rax\n"); break;
         case EXPR_SUB:  emit(self, "\tsubq\t%%rcx, %%rax\n"); break;
@@ -611,17 +621,35 @@ void gen_value(gen_t *self, expr_t *expr)
     }
 }
 
-static inline const char *jcc(int kind, bool val)
+static inline const char *jcc(int kind, bool val, ty_t *ty)
 {
-    // FIXME: signedness
     switch (kind) {
-    case EXPR_LT:   return val ? "jl" : "jge";
-    case EXPR_GT:   return val ? "jg" : "jle";
-    case EXPR_LE:   return val ? "jle" : "jg";
-    case EXPR_GE:   return val ? "jge" : "jl";
-    case EXPR_EQ:   return val ? "je" : "jne";
-    case EXPR_NE:   return val ? "jne" : "je";
-    default:        ASSERT_NOT_REACHED();
+    case EXPR_LT:
+        if (ty->kind & TY_SIG_MASK)
+            return val ? "jl" : "jge";
+        else
+            return val ? "jb" : "jae";
+    case EXPR_GT:
+        if (ty->kind & TY_SIG_MASK)
+            return val ? "jg" : "jle";
+        else
+            return val ? "ja" : "jbe";
+    case EXPR_LE:
+        if (ty->kind & TY_SIG_MASK)
+            return val ? "jle" : "jg";
+        else
+            return val ? "jbe" : "ja";
+    case EXPR_GE:
+        if (ty->kind & TY_SIG_MASK)
+            return val ? "jge" : "jl";
+        else
+            return val ? "jae" : "jb";
+    case EXPR_EQ:
+        return val ? "je" : "jne";
+    case EXPR_NE:
+        return val ? "jne" : "je";
+    default:
+        ASSERT_NOT_REACHED();
     }
 }
 
@@ -643,7 +671,7 @@ void gen_bool(gen_t *self, expr_t *expr, bool val, int label)
         emit_pop(self, "%rax");
         emit(self, "\tcmpq\t%%rcx, %%rax\n");
         // Generate jump
-        emit_jump(self, jcc(expr->kind, val), label);
+        emit_jump(self, jcc(expr->kind, val, expr->as_binary.lhs->ty), label);
         break;
     case EXPR_LNOT:
         gen_bool(self, expr->as_unary.arg, !val, label);
@@ -989,6 +1017,9 @@ void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
     if (sym->kind != SYM_STATIC)
         emit(self, "\t.globl\t%s\n", sym->asm_name);
 
+    // Mark symbol as function (valgrind)
+    emit(self, "\t.type\t%s,@function\n", sym->asm_name);
+
     // Generate entry sequence
     emit(self,
         "%s:\n"
@@ -1058,6 +1089,9 @@ void gen_func(gen_t *self, sym_t *sym, stmt_vec_t *stmts)
     emit(self,
         "\tleave\n"
         "\tret\n");
+
+    // Mark length of function (valgrind)
+    emit(self, "\t.size\t%s,.-%s\n", sym->asm_name, sym->asm_name);
 
     // Provide stackframe size
     emit(self, "\t.set\t%s_fs, %d\n", sym->asm_name, ALIGNED(self->offset, 16));
