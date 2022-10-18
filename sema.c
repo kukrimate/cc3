@@ -1432,7 +1432,7 @@ static void bind_scalar(init_t *out, init_context_t *ctx, ty_t *ty)
     // If we reach a member of an aggregate without an initializer, we need to
     // zero initialize it. We make that explicit to simplify code generation.
     if (ctx->it == ctx->end) {
-        out->as_expr = make_const_expr(&ty_int, 0);
+        out->as_expr = convert_by_assignment(ty, make_const_expr(self, &ty_int, 0));
         return;
     }
 
@@ -1441,7 +1441,7 @@ static void bind_scalar(init_t *out, init_context_t *ctx, ty_t *ty)
     if (!expr)
         err("Trailing garbage after scalar initializer");
 
-    out->as_expr = expr;
+    out->as_expr = convert_by_assignment(ty, expr);
 }
 
 static bool try_bind_str_lit(init_t *out, init_context_t *ctx, ty_t *ty)
